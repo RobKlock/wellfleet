@@ -86,10 +86,21 @@ class MispricingDetector:
             self.logger.debug(f"Skipping unparseable market: {market['ticker']}")
             return None
 
+        # Map metric names: "minimum" → "min", "maximum" → "max", "average" → "avg"
+        metric_map = {
+            "minimum": "min",
+            "maximum": "max",
+            "average": "avg"
+        }
+        forecast_metric_key = metric_map.get(parsed.metric, parsed.metric)
+
         # Get forecast value for the relevant metric
-        forecast_value = forecast.get(parsed.metric)
+        forecast_value = forecast.get(forecast_metric_key)
         if forecast_value is None:
-            self.logger.warning(f"Forecast missing metric '{parsed.metric}' for {market['ticker']}")
+            self.logger.warning(
+                f"Forecast missing metric '{forecast_metric_key}' (parsed as '{parsed.metric}') "
+                f"for {market['ticker']}"
+            )
             return None
 
         # Calculate true probability based on forecast
