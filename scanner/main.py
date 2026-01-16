@@ -139,9 +139,10 @@ class KalshiWeatherScanner:
                         # Fetch current conditions
                         current_conditions = self.nws.get_current_conditions(station_id)
 
-                        # Fetch recent observations (last 48 hours)
+                        # Fetch recent observations (last 200 = ~24-48 hours of hourly data)
                         # Critical for today's markets - gives us actual temps from earlier today
-                        observations = self.nws.get_observations(station_id, hours=48)
+                        # Need enough observations to capture overnight lows/highs
+                        observations = self.nws.get_observations(station_id)
 
                         if current_conditions:
                             self.logger.info(

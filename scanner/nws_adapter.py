@@ -145,16 +145,19 @@ class NWSAdapter:
         location = self.LOCATIONS[key]
         return self.get_hourly_forecast(location["lat"], location["lon"])
 
-    def get_observations(self, station_id: str, hours: int = 48) -> List[Dict]:
+    def get_observations(self, station_id: str, hours: int = 200) -> List[Dict]:
         """
         Fetch recent temperature observations from NWS station
 
         Args:
             station_id: NWS station identifier (e.g., "KDEN", "KMIA")
-            hours: Number of hours to retrieve (default 48)
+            hours: Number of observations to retrieve (default 200 = ~24-48 hours)
 
         Returns:
             List of observation dictionaries with timestamps and temperatures
+
+        Note: NWS provides observations roughly hourly, so 200 observations
+        gives us about 24-48 hours of data to capture full daily min/max
         """
         url = f"{self.base_url}/stations/{station_id}/observations"
         params = {"limit": hours}
