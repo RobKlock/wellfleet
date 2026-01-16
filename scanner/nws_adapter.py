@@ -145,11 +145,119 @@ class NWSAdapter:
         location = self.LOCATIONS[key]
         return self.get_hourly_forecast(location["lat"], location["lon"])
 
+    def get_observations(self, station_id: str, hours: int = 48) -> List[Dict]:
+        """
+        Fetch recent temperature observations from NWS station
+
+        Args:
+            station_id: NWS station identifier (e.g., "KDEN", "KMIA")
+            hours: Number of hours to retrieve (default 48)
+
+        Returns:
+            List of observation dictionaries with timestamps and temperatures
+        """
+        url = f"{self.base_url}/stations/{station_id}/observations"
+        params = {"limit": hours}
+
+        try:
+            self.logger.info(f"Fetching observations from station {station_id}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+
+            data = response.json()
+            observations = data.get("features", [])
+
+            # Extract temperature data
+            temps = []
+            for obs in observations:
+                props = obs.get("properties", {})
+                timestamp = props.get("timestamp")
+                temp_c = props.get("temperature", {}).get("value")
+
+                if timestamp and temp_c is not None:
+                    # Convert Celsius to Fahrenheit
+                    temp_f = (temp_c * 9/5) + 32
+                    temps.append({
+                        "timestamp": timestamp,
+                        "temperature": temp_f
+                    })
+
+            self.logger.info(f"Retrieved {len(temps)} observations from {station_id}")
+            return temps
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to fetch observations: {e}")
+            return []
+
+    def get_current_conditions(self, station_id: str) -> Optional[Dict]:
+        """
+        Get latest weather observation including sky cover, wind, and dewpoint
+
+        Args:
+            station_id: NWS station identifier (e.g., "KDEN", "KMIA")
+
+        Returns:
+            Dictionary with current conditions or None if unavailable
+        """
+        url = f"{self.base_url}/stations/{station_id}/observations/latest"
+
+        try:
+            self.logger.info(f"Fetching current conditions from {station_id}")
+            response = self.session.get(url, timeout=30)
+            response.raise_for_status()
+
+            data = response.json()
+            props = data.get("properties", {})
+
+            # Extract key meteorological parameters
+            temp_c = props.get("temperature", {}).get("value")
+            dewpoint_c = props.get("dewpoint", {}).get("value")
+            wind_speed_kph = props.get("windSpeed", {}).get("value")
+
+            # Sky cover as percentage (0-100)
+            text_description = props.get("textDescription", "").lower()
+            if "clear" in text_description or "sunny" in text_description:
+                sky_cover = 0
+            elif "few" in text_description:
+                sky_cover = 25
+            elif "scattered" in text_description or "partly" in text_description:
+                sky_cover = 50
+            elif "broken" in text_description or "mostly" in text_description:
+                sky_cover = 75
+            elif "overcast" in text_description or "cloudy" in text_description:
+                sky_cover = 100
+            else:
+                sky_cover = 50  # Default to partly cloudy
+
+            # Convert units to Fahrenheit and mph
+            conditions = {
+                "timestamp": props.get("timestamp"),
+                "temperature": (temp_c * 9/5) + 32 if temp_c is not None else None,
+                "dewpoint": (dewpoint_c * 9/5) + 32 if dewpoint_c is not None else None,
+                "wind_speed": wind_speed_kph * 0.621371 if wind_speed_kph is not None else 0,
+                "sky_cover": sky_cover,
+                "description": props.get("textDescription", "")
+            }
+
+            self.logger.info(
+                f"Current: {conditions['temperature']:.1f}°F, "
+                f"dewpoint={conditions['dewpoint']:.1f}°F, "
+                f"wind={conditions['wind_speed']:.1f}mph, "
+                f"sky={conditions['sky_cover']}%"
+            )
+
+            return conditions
+
+        except requests.exceptions.RequestException as e:
+            self.logger.error(f"Failed to fetch current conditions: {e}")
+            return None
+
     def extract_temperature_stats_for_date(
         self,
         periods: List[Dict],
         target_date: str,
-        timezone: str
+        timezone: str,
+        include_meteorology: bool = False
     ) -> Optional[Dict]:
         """
         Calculate min/max/avg temperature for a specific date
@@ -158,6 +266,7 @@ class NWSAdapter:
             periods: List of hourly forecast periods from NWS
             target_date: ISO date string (e.g., "2026-01-12")
             timezone: IANA timezone string (e.g., "America/Denver")
+            include_meteorology: If True, include sky cover, wind, and dewpoint data
 
         Returns:
             Dictionary with temperature statistics or None if no data available
@@ -167,6 +276,9 @@ class NWSAdapter:
             target_dt = datetime.fromisoformat(target_date).date()
 
             temps_for_date = []
+            sky_covers = []
+            wind_speeds = []
+            dewpoints = []
 
             for period in periods:
                 # Parse startTime and convert to target timezone
@@ -184,6 +296,38 @@ class NWSAdapter:
                     if temp is not None:
                         temps_for_date.append(temp)
 
+                    if include_meteorology:
+                        # Extract sky cover from forecast
+                        short_forecast = period.get("shortForecast", "").lower()
+                        if "clear" in short_forecast or "sunny" in short_forecast:
+                            sky_covers.append(0)
+                        elif "few" in short_forecast:
+                            sky_covers.append(25)
+                        elif "scattered" in short_forecast or "partly" in short_forecast:
+                            sky_covers.append(50)
+                        elif "broken" in short_forecast or "mostly" in short_forecast:
+                            sky_covers.append(75)
+                        elif "overcast" in short_forecast or "cloudy" in short_forecast:
+                            sky_covers.append(100)
+                        else:
+                            sky_covers.append(50)
+
+                        # Extract wind speed
+                        wind_str = period.get("windSpeed", "0 mph")
+                        try:
+                            wind_speed = float(wind_str.split()[0])
+                            wind_speeds.append(wind_speed)
+                        except (ValueError, IndexError):
+                            wind_speeds.append(0)
+
+                        # Extract dewpoint (if available)
+                        dewpoint = period.get("dewpoint", {})
+                        if isinstance(dewpoint, dict):
+                            dewpoint_value = dewpoint.get("value")
+                            if dewpoint_value is not None:
+                                # Convert Celsius to Fahrenheit
+                                dewpoints.append((dewpoint_value * 9/5) + 32)
+
             if not temps_for_date:
                 self.logger.warning(f"No temperature data found for {target_date} in {timezone}")
                 return None
@@ -197,6 +341,14 @@ class NWSAdapter:
                 "timezone": timezone,
                 "num_periods": len(temps_for_date)
             }
+
+            if include_meteorology:
+                stats["sky_covers"] = sky_covers
+                stats["wind_speeds"] = wind_speeds
+                stats["dewpoints"] = dewpoints
+                stats["avg_sky_cover"] = sum(sky_covers) / len(sky_covers) if sky_covers else 50
+                stats["avg_wind_speed"] = sum(wind_speeds) / len(wind_speeds) if wind_speeds else 0
+                stats["avg_dewpoint"] = sum(dewpoints) / len(dewpoints) if dewpoints else None
 
             self.logger.info(
                 f"Temperature stats for {target_date}: "

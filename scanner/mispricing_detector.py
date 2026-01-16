@@ -7,9 +7,15 @@ import logging
 import math
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 from .market_parser import ParsedMarket
+
+try:
+    from scipy.stats import norm
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
 
 
 @dataclass
@@ -43,6 +49,319 @@ class Opportunity:
     close_time: datetime
 
 
+class BoundaryForecastModel:
+    """
+    Enhanced forecast model for markets within ±3°F of NWS forecasts
+
+    Uses current conditions, observations, and meteorological adjustments
+    to calculate refined probabilities for boundary cases.
+    """
+
+    def __init__(self):
+        """Initialize boundary forecast model"""
+        self.logger = logging.getLogger(__name__)
+
+        # Base forecast uncertainty (standard deviation in °F)
+        self.base_uncertainty = 2.5
+
+    def calculate_boundary_probability(
+        self,
+        forecast_value: float,
+        threshold: float,
+        threshold_high: Optional[float],
+        comparison: str,
+        current_conditions: Optional[Dict] = None,
+        observations: Optional[List[Dict]] = None,
+        forecast_stats: Optional[Dict] = None
+    ) -> float:
+        """
+        Calculate refined probability for markets near forecast boundaries
+
+        Args:
+            forecast_value: NWS forecast temperature (°F)
+            threshold: Market threshold temperature (°F)
+            threshold_high: Upper threshold for "between" markets
+            comparison: Comparison operator ("above", "below", "between")
+            current_conditions: Current weather conditions (temp, dewpoint, wind, sky)
+            observations: Recent temperature observations (last 48 hours)
+            forecast_stats: Forecast meteorological data (sky covers, wind speeds, dewpoints)
+
+        Returns:
+            Probability between 0 and 1
+        """
+        if not SCIPY_AVAILABLE:
+            self.logger.warning("scipy not available, using simple heuristics")
+            return self._simple_probability(forecast_value, threshold, threshold_high, comparison)
+
+        # Calculate meteorological adjustments
+        adjustment = self._calculate_meteorological_adjustment(
+            forecast_value=forecast_value,
+            current_conditions=current_conditions,
+            forecast_stats=forecast_stats
+        )
+
+        # Calculate NWS bias from observations
+        bias = self._calculate_nws_bias(
+            forecast_value=forecast_value,
+            observations=observations
+        )
+
+        # Adjusted forecast
+        adjusted_forecast = forecast_value + adjustment + bias
+
+        # Calculate uncertainty (standard deviation)
+        uncertainty = self._calculate_uncertainty(
+            current_conditions=current_conditions,
+            forecast_stats=forecast_stats
+        )
+
+        # Calculate probability using normal distribution
+        if comparison in ["above", "at least"]:
+            # P(temp >= threshold)
+            prob = 1 - norm.cdf(threshold, loc=adjusted_forecast, scale=uncertainty)
+        elif comparison == "below":
+            # P(temp < threshold)
+            prob = norm.cdf(threshold, loc=adjusted_forecast, scale=uncertainty)
+        elif comparison == "between":
+            # P(threshold <= temp <= threshold_high)
+            prob_below_high = norm.cdf(threshold_high, loc=adjusted_forecast, scale=uncertainty)
+            prob_below_low = norm.cdf(threshold, loc=adjusted_forecast, scale=uncertainty)
+            prob = prob_below_high - prob_below_low
+        else:
+            self.logger.warning(f"Unknown comparison: {comparison}")
+            return 0.50
+
+        # Clamp to [0.05, 0.95] for safety
+        prob = max(0.05, min(0.95, prob))
+
+        self.logger.info(
+            f"Boundary model: forecast={forecast_value:.1f}°F, "
+            f"adjusted={adjusted_forecast:.1f}°F (adj={adjustment:+.1f}, bias={bias:+.1f}), "
+            f"uncertainty={uncertainty:.1f}°F, threshold={threshold:.0f}°F, "
+            f"prob={prob:.1%}"
+        )
+
+        return prob
+
+    def _calculate_meteorological_adjustment(
+        self,
+        forecast_value: float,
+        current_conditions: Optional[Dict],
+        forecast_stats: Optional[Dict]
+    ) -> float:
+        """
+        Calculate temperature adjustment based on meteorological factors
+
+        Factors:
+        1. Current temperature constraint
+        2. Radiative cooling (clear skies overnight)
+        3. Atmospheric mixing (wind speed)
+        4. Dewpoint spread (humidity effects)
+
+        Returns:
+            Temperature adjustment in °F (can be positive or negative)
+        """
+        total_adjustment = 0.0
+
+        if not current_conditions or not forecast_stats:
+            return total_adjustment
+
+        current_temp = current_conditions.get("temperature")
+        if current_temp is None:
+            return total_adjustment
+
+        # 1. Current temperature constraint
+        # If current temp is already near threshold, adjust forecast
+        temp_diff = current_temp - forecast_value
+        if abs(temp_diff) > 5:
+            # Current temp significantly different from forecast
+            # Give current temp 20% weight
+            total_adjustment += 0.2 * temp_diff
+
+        # 2. Radiative cooling adjustment (for overnight minimum temps)
+        sky_cover = forecast_stats.get("avg_sky_cover", 50)
+        if sky_cover is not None and sky_cover < 30:
+            # Clear skies enhance radiative cooling
+            # Can drop temperature 1-3°F more than forecast
+            clear_sky_adjustment = -1.5 * (1 - sky_cover / 100)
+            total_adjustment += clear_sky_adjustment
+
+        # 3. Wind mixing adjustment
+        wind_speed = forecast_stats.get("avg_wind_speed", 0)
+        if wind_speed is not None and wind_speed > 10:
+            # High winds reduce temperature extremes
+            # Warming effect on minimums, cooling effect on maximums
+            # For now, assume we're looking at minimums (most common)
+            wind_adjustment = min(2.0, 0.1 * (wind_speed - 10))
+            total_adjustment += wind_adjustment
+
+        # 4. Dewpoint spread adjustment
+        current_dewpoint = current_conditions.get("dewpoint")
+        if current_temp is not None and current_dewpoint is not None:
+            dewpoint_spread = current_temp - current_dewpoint
+
+            if dewpoint_spread > 20:
+                # Very dry air, enhances radiative cooling
+                total_adjustment -= 1.0
+            elif dewpoint_spread < 5:
+                # High humidity, moderates temperature swings
+                total_adjustment += 0.5
+
+        return total_adjustment
+
+    def _calculate_nws_bias(
+        self,
+        forecast_value: float,
+        observations: Optional[List[Dict]]
+    ) -> float:
+        """
+        Calculate NWS forecast bias from recent observations
+
+        Compares recent forecasts to actual observations to detect
+        systematic over/under-prediction.
+
+        Args:
+            forecast_value: Current NWS forecast
+            observations: Recent temperature observations
+
+        Returns:
+            Bias adjustment in °F (positive if NWS tends to under-predict)
+        """
+        if not observations or len(observations) < 10:
+            return 0.0
+
+        # For simplicity, assume NWS has been accurate recently
+        # In production, would compare recent forecasts to actual temps
+        # and calculate running bias
+
+        # Placeholder: check if observations show consistent pattern
+        recent_temps = [obs["temperature"] for obs in observations[:24]]
+        avg_recent = sum(recent_temps) / len(recent_temps)
+
+        # If recent average is consistently different from forecast,
+        # apply small bias adjustment
+        bias = 0.1 * (avg_recent - forecast_value)
+
+        # Limit bias to ±1°F
+        bias = max(-1.0, min(1.0, bias))
+
+        return bias
+
+    def _calculate_uncertainty(
+        self,
+        current_conditions: Optional[Dict],
+        forecast_stats: Optional[Dict]
+    ) -> float:
+        """
+        Calculate forecast uncertainty (standard deviation)
+
+        Uncertainty decreases with:
+        - Current observations available
+        - Stable weather patterns
+        - Low wind variability
+
+        Returns:
+            Standard deviation in °F
+        """
+        uncertainty = self.base_uncertainty
+
+        if current_conditions:
+            # Having current conditions reduces uncertainty
+            uncertainty *= 0.9
+
+        if forecast_stats:
+            # Check wind variability
+            wind_speeds = forecast_stats.get("wind_speeds", [])
+            if wind_speeds and len(wind_speeds) > 1:
+                wind_std = math.sqrt(
+                    sum((w - sum(wind_speeds)/len(wind_speeds))**2 for w in wind_speeds) / len(wind_speeds)
+                )
+                if wind_std > 5:
+                    # High wind variability increases uncertainty
+                    uncertainty *= 1.2
+
+        # Clamp uncertainty to reasonable range
+        uncertainty = max(1.5, min(4.0, uncertainty))
+
+        return uncertainty
+
+    def _simple_probability(
+        self,
+        forecast_value: float,
+        threshold: float,
+        threshold_high: Optional[float],
+        comparison: str
+    ) -> float:
+        """
+        Fallback simple probability calculation (when scipy unavailable)
+
+        Uses same heuristics as original MispricingDetector
+        """
+        if comparison in ["above", "at least"]:
+            distance = forecast_value - threshold
+
+            if distance > 5:
+                return 0.95
+            elif distance > 2:
+                return 0.85
+            elif distance > 0:
+                return 0.70
+            elif distance > -2:
+                return 0.50
+            elif distance > -5:
+                return 0.15
+            else:
+                return 0.05
+
+        elif comparison == "below":
+            distance = threshold - forecast_value
+
+            if distance > 5:
+                return 0.95
+            elif distance > 2:
+                return 0.85
+            elif distance > 0:
+                return 0.70
+            elif distance > -2:
+                return 0.50
+            elif distance > -5:
+                return 0.15
+            else:
+                return 0.05
+
+        elif comparison == "between":
+            if threshold <= forecast_value <= threshold_high:
+                margin = min(forecast_value - threshold, threshold_high - forecast_value)
+
+                if margin > 3:
+                    return 0.90
+                elif margin > 1:
+                    return 0.75
+                else:
+                    return 0.60
+
+            elif forecast_value < threshold:
+                distance = threshold - forecast_value
+
+                if distance < 2:
+                    return 0.40
+                elif distance < 5:
+                    return 0.15
+                else:
+                    return 0.05
+            else:
+                distance = forecast_value - threshold_high
+
+                if distance < 2:
+                    return 0.40
+                elif distance < 5:
+                    return 0.15
+                else:
+                    return 0.05
+
+        return 0.50
+
+
 class MispricingDetector:
     """Detects mispricings by comparing market prices to forecast data"""
 
@@ -50,7 +369,8 @@ class MispricingDetector:
         self,
         bankroll: float = 1000.0,
         kelly_fraction: float = 0.25,
-        min_edge_threshold: float = 0.20
+        min_edge_threshold: float = 0.20,
+        use_boundary_model: bool = True
     ):
         """
         Initialize mispricing detector
@@ -59,17 +379,27 @@ class MispricingDetector:
             bankroll: Total capital available for betting
             kelly_fraction: Fraction of Kelly criterion to use (0.25 = 1/4 Kelly)
             min_edge_threshold: Minimum edge required to flag opportunity (default 20%)
+            use_boundary_model: Use enhanced boundary model for markets within ±3°F
         """
         self.bankroll = bankroll
         self.kelly_fraction = kelly_fraction
         self.min_edge_threshold = min_edge_threshold
+        self.use_boundary_model = use_boundary_model
         self.logger = logging.getLogger(__name__)
+
+        # Initialize boundary model if enabled
+        if self.use_boundary_model:
+            self.boundary_model = BoundaryForecastModel()
+        else:
+            self.boundary_model = None
 
     def analyze_temperature_market(
         self,
         market: Dict,
         parsed: ParsedMarket,
-        forecast: Dict
+        forecast: Dict,
+        current_conditions: Optional[Dict] = None,
+        observations: Optional[List[Dict]] = None
     ) -> Optional[Opportunity]:
         """
         Analyze a temperature market for mispricing
@@ -78,6 +408,8 @@ class MispricingDetector:
             market: Market data from Kalshi API
             parsed: Parsed market information
             forecast: Temperature forecast statistics
+            current_conditions: Current weather conditions (for boundary model)
+            observations: Recent temperature observations (for boundary model)
 
         Returns:
             Opportunity object if significant mispricing found, None otherwise
@@ -103,13 +435,35 @@ class MispricingDetector:
             )
             return None
 
-        # Calculate true probability based on forecast
-        true_prob = self._calculate_probability(
+        # Determine if this is a boundary case (within ±3°F of threshold)
+        is_boundary_case = self._is_boundary_case(
             forecast_value=forecast_value,
             threshold=parsed.threshold,
             threshold_high=parsed.threshold_high,
             comparison=parsed.comparison
         )
+
+        # Calculate true probability
+        if is_boundary_case and self.boundary_model and (current_conditions or observations):
+            # Use enhanced boundary model
+            self.logger.info(f"Using boundary model for {market['ticker']} (boundary case)")
+            true_prob = self.boundary_model.calculate_boundary_probability(
+                forecast_value=forecast_value,
+                threshold=parsed.threshold,
+                threshold_high=parsed.threshold_high,
+                comparison=parsed.comparison,
+                current_conditions=current_conditions,
+                observations=observations,
+                forecast_stats=forecast
+            )
+        else:
+            # Use simple heuristic model
+            true_prob = self._calculate_probability(
+                forecast_value=forecast_value,
+                threshold=parsed.threshold,
+                threshold_high=parsed.threshold_high,
+                comparison=parsed.comparison
+            )
 
         # Get market prices (use bids since that's what we can actually get)
         market_yes_price = market.get("yes_bid", 0)
@@ -181,6 +535,41 @@ class MispricingDetector:
             liquidity_pool_size=market.get("liquidity_pool", {}).get("pool_size", 0),
             close_time=datetime.fromisoformat(market["close_time"].replace('Z', '+00:00'))
         )
+
+    def _is_boundary_case(
+        self,
+        forecast_value: float,
+        threshold: float,
+        threshold_high: Optional[float],
+        comparison: str,
+        boundary_distance: float = 3.0
+    ) -> bool:
+        """
+        Determine if market is a boundary case (within ±3°F of threshold)
+
+        Args:
+            forecast_value: NWS forecast temperature
+            threshold: Market threshold
+            threshold_high: Upper threshold (for "between" markets)
+            comparison: Comparison operator
+            boundary_distance: Distance threshold in °F (default 3.0)
+
+        Returns:
+            True if within boundary distance, False otherwise
+        """
+        if comparison in ["above", "at least", "below"]:
+            # Check distance to single threshold
+            distance = abs(forecast_value - threshold)
+            return distance <= boundary_distance
+
+        elif comparison == "between":
+            # Check distance to nearest boundary
+            distance_to_lower = abs(forecast_value - threshold)
+            distance_to_upper = abs(forecast_value - threshold_high) if threshold_high else float('inf')
+            min_distance = min(distance_to_lower, distance_to_upper)
+            return min_distance <= boundary_distance
+
+        return False
 
     def _calculate_probability(
         self,
