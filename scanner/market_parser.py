@@ -74,6 +74,15 @@ class MarketParser:
         re.IGNORECASE
     )
 
+    # Pattern 5: Compact format without location (>X°, <X°, X-Y°)
+    # Example: "Will the minimum temperature be  >20° on Jan 17, 2026?"
+    # Example: "Will the minimum temperature be  <13° on Jan 17, 2026?"
+    # Example: "Will the minimum temperature be  19-20° on Jan 17, 2026?"
+    PATTERN_COMPACT = re.compile(
+        r"Will the (minimum|maximum|average) temperature be\s+([><])?(\d+)(?:-(\d+))?°?\s+on ([A-Za-z]+ \d+, \d{4})",
+        re.IGNORECASE
+    )
+
     def __init__(self):
         """Initialize the market parser"""
         self.logger = logging.getLogger(__name__)
@@ -108,6 +117,11 @@ class MarketParser:
         match = self.PATTERN_LOWEST_HIGHEST.search(title)
         if match:
             return self._parse_lowest_highest(match, ticker)
+
+        # Try Pattern 5: Compact format (>X°, <X°, X-Y°)
+        match = self.PATTERN_COMPACT.search(title)
+        if match:
+            return self._parse_compact(match, ticker)
 
         # Unable to parse
         self.logger.warning(f"Unable to parse market title: {title}")
@@ -236,4 +250,63 @@ class MarketParser:
             )
         except (ValueError, IndexError) as e:
             self.logger.error(f"Error parsing lowest/highest: {e}")
+            return ParsedMarket(ticker=ticker, is_parseable=False)
+
+    def _parse_compact(self, match: re.Match, ticker: str) -> ParsedMarket:
+        """Parse compact format without location (>X°, <X°, X-Y°)"""
+        try:
+            metric = match.group(1).lower()  # "minimum", "maximum", or "average"
+            comparison_symbol = match.group(2)  # ">", "<", or None
+            threshold_low = float(match.group(3))
+            threshold_high_str = match.group(4)  # For range format like "19-20"
+            date_str = match.group(5)  # e.g., "Jan 17, 2026"
+
+            # Parse date
+            parsed_date = datetime.strptime(date_str, "%b %d, %Y").date()
+
+            # Infer location from ticker
+            # KXLOWTDEN → Denver, CO
+            # KXLOWTMIA → Miami, FL
+            location = None
+            if "DEN" in ticker.upper():
+                location = "Denver, CO"
+            elif "MIA" in ticker.upper():
+                location = "Miami, FL"
+            else:
+                self.logger.warning(f"Cannot infer location from ticker: {ticker}")
+                return ParsedMarket(ticker=ticker, is_parseable=False)
+
+            # Determine comparison type and thresholds
+            if threshold_high_str:
+                # Range format: "19-20"
+                threshold_high = float(threshold_high_str)
+                comparison = "between"
+                threshold = threshold_low
+            elif comparison_symbol == ">":
+                # Greater than: ">20"
+                comparison = "above"
+                threshold = threshold_low
+                threshold_high = None
+            elif comparison_symbol == "<":
+                # Less than: "<13"
+                comparison = "below"
+                threshold = threshold_low
+                threshold_high = None
+            else:
+                # No symbol - unclear, skip
+                self.logger.warning(f"Cannot determine comparison for: {ticker}")
+                return ParsedMarket(ticker=ticker, is_parseable=False)
+
+            return ParsedMarket(
+                ticker=ticker,
+                location=location,
+                metric=metric,
+                threshold=threshold,
+                threshold_high=threshold_high,
+                comparison=comparison,
+                date=parsed_date,
+                is_parseable=True
+            )
+        except (ValueError, IndexError) as e:
+            self.logger.error(f"Error parsing compact format: {e}")
             return ParsedMarket(ticker=ticker, is_parseable=False)
