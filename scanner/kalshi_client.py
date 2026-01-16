@@ -315,3 +315,43 @@ class KalshiClient:
         data = self._make_request("GET", endpoint)
 
         return data.get("market", {})
+
+    def get_series(self, series_ticker: str) -> Dict:
+        """
+        Fetch information about a series
+
+        Args:
+            series_ticker: Series ticker (e.g., KXLOWTDEN)
+
+        Returns:
+            Series dictionary
+        """
+        endpoint = f"/series/{series_ticker}"
+        data = self._make_request("GET", endpoint)
+
+        return data.get("series", {})
+
+    def get_markets_for_series(self, series_ticker: str, status: str = "open") -> List[Dict]:
+        """
+        Fetch all markets for a specific series
+
+        Args:
+            series_ticker: Series ticker (e.g., KXLOWTDEN, KXLOWTMIA)
+            status: Market status filter (open, closed, unopened, settled)
+
+        Returns:
+            List of market dictionaries
+        """
+        endpoint = "/markets"
+        params = {
+            "series_ticker": series_ticker,
+            "status": status
+        }
+
+        self.logger.info(f"Fetching markets for series {series_ticker} with status={status}")
+        data = self._make_request("GET", endpoint, params=params)
+
+        markets = data.get("markets", [])
+        self.logger.info(f"Found {len(markets)} markets in series {series_ticker}")
+
+        return markets

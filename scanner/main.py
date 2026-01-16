@@ -60,12 +60,17 @@ class KalshiWeatherScanner:
         # Setup logging
         self.logger = logging.getLogger(__name__)
 
-    def scan(self, specific_tickers: Optional[List[str]] = None) -> List[Opportunity]:
+    def scan(
+        self,
+        specific_tickers: Optional[List[str]] = None,
+        series_tickers: Optional[List[str]] = None
+    ) -> List[Opportunity]:
         """
         Main scanning process
 
         Args:
             specific_tickers: Optional list of specific market tickers to scan
+            series_tickers: Optional list of series tickers to scan (e.g., KXLOWTDEN)
 
         Returns:
             List of identified opportunities
@@ -74,8 +79,11 @@ class KalshiWeatherScanner:
         self.logger.info("Starting Kalshi Weather Scanner")
         self.logger.info("=" * 60)
 
-        # If specific tickers provided, scan those directly
-        if specific_tickers:
+        # Determine which fetching method to use
+        if series_tickers:
+            self.logger.info(f"Scanning {len(series_tickers)} series...")
+            weather_markets = self._fetch_markets_from_series(series_tickers)
+        elif specific_tickers:
             self.logger.info(f"Scanning {len(specific_tickers)} specific markets...")
             weather_markets = self._fetch_specific_markets(specific_tickers)
         else:
@@ -157,6 +165,52 @@ class KalshiWeatherScanner:
         self.logger.info("=" * 60)
 
         return opportunities
+
+    def _fetch_markets_from_series(self, series_tickers: List[str]) -> List[dict]:
+        """
+        Fetch all markets from specified series
+
+        Args:
+            series_tickers: List of series tickers (e.g., KXLOWTDEN, KXLOWTMIA)
+
+        Returns:
+            List of market dictionaries
+        """
+        all_markets = []
+        for series_ticker in series_tickers:
+            try:
+                self.logger.info(f"Fetching series: {series_ticker}")
+
+                # Get all open markets for this series
+                markets = self.kalshi.get_markets_for_series(series_ticker, status="open")
+
+                # Format each market
+                for market in markets:
+                    formatted_market = {
+                        "ticker": market["ticker"],
+                        "title": market["title"],
+                        "event_ticker": market.get("event_ticker", ""),
+                        "close_time": market["close_time"],
+                        "expiration_time": market.get("expiration_time", ""),
+                        "yes_bid": market.get("yes_bid"),
+                        "yes_ask": market.get("yes_ask"),
+                        "no_bid": market.get("no_bid"),
+                        "no_ask": market.get("no_ask"),
+                        "volume": market.get("volume", 0),
+                        "liquidity_pool": market.get("liquidity_pool"),
+                        "category": market.get("category"),
+                        "status": market.get("status"),
+                    }
+                    all_markets.append(formatted_market)
+
+                self.logger.info(f"  ✓ Found {len(markets)} markets in {series_ticker}")
+
+            except Exception as e:
+                self.logger.error(f"  ✗ Failed to fetch series {series_ticker}: {e}")
+                continue
+
+        self.logger.info(f"Total markets fetched from series: {len(all_markets)}")
+        return all_markets
 
     def _fetch_specific_markets(self, tickers: List[str]) -> List[dict]:
         """
