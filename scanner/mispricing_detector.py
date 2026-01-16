@@ -548,7 +548,7 @@ class MispricingDetector:
             confidence=confidence,
             reasoning=reasoning,
             data_source="NWS",
-            liquidity_pool_size=market.get("liquidity_pool", {}).get("pool_size", 0),
+            liquidity_pool_size=(market.get("liquidity_pool") or {}).get("pool_size", 0),
             close_time=datetime.fromisoformat(market["close_time"].replace('Z', '+00:00'))
         )
 
