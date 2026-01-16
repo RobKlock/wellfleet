@@ -257,16 +257,21 @@ class NWSAdapter:
         periods: List[Dict],
         target_date: str,
         timezone: str,
-        include_meteorology: bool = False
+        include_meteorology: bool = False,
+        observations: Optional[List[Dict]] = None
     ) -> Optional[Dict]:
         """
         Calculate min/max/avg temperature for a specific date
+
+        Combines actual observations (if target_date is today) with forecast data
+        to get accurate min/max values that account for temperatures that already occurred.
 
         Args:
             periods: List of hourly forecast periods from NWS
             target_date: ISO date string (e.g., "2026-01-12")
             timezone: IANA timezone string (e.g., "America/Denver")
             include_meteorology: If True, include sky cover, wind, and dewpoint data
+            observations: Optional list of recent observations to merge with forecast
 
         Returns:
             Dictionary with temperature statistics or None if no data available
@@ -274,11 +279,35 @@ class NWSAdapter:
         try:
             tz = pytz.timezone(timezone)
             target_dt = datetime.fromisoformat(target_date).date()
+            today = datetime.now(tz).date()
 
             temps_for_date = []
             sky_covers = []
             wind_speeds = []
             dewpoints = []
+
+            # If target date is TODAY and we have observations, include actual temps from earlier today
+            if target_dt == today and observations:
+                self.logger.info(f"Target date {target_date} is today - merging observations with forecast")
+
+                for obs in observations:
+                    obs_time_str = obs.get("timestamp")
+                    if not obs_time_str:
+                        continue
+
+                    # Parse observation timestamp
+                    obs_time = datetime.fromisoformat(obs_time_str.replace('Z', '+00:00'))
+                    obs_local_time = obs_time.astimezone(tz)
+
+                    # Only include observations from TODAY
+                    if obs_local_time.date() == target_dt:
+                        temp = obs.get("temperature")
+                        if temp is not None:
+                            temps_for_date.append(temp)
+                            self.logger.debug(f"Added observed temp: {temp:.1f}°F at {obs_local_time}")
+
+                if temps_for_date:
+                    self.logger.info(f"Included {len(temps_for_date)} observed temperatures from today")
 
             for period in periods:
                 # Parse startTime and convert to target timezone
@@ -332,6 +361,12 @@ class NWSAdapter:
                 self.logger.warning(f"No temperature data found for {target_date} in {timezone}")
                 return None
 
+            # Track if we used actual observations from today
+            used_observations = target_dt == today and observations and any(
+                datetime.fromisoformat(obs.get("timestamp", "").replace('Z', '+00:00')).astimezone(tz).date() == target_dt
+                for obs in observations if obs.get("timestamp")
+            )
+
             stats = {
                 "date": target_date,
                 "min": min(temps_for_date),
@@ -339,7 +374,8 @@ class NWSAdapter:
                 "avg": sum(temps_for_date) / len(temps_for_date),
                 "hourly_temps": temps_for_date,
                 "timezone": timezone,
-                "num_periods": len(temps_for_date)
+                "num_periods": len(temps_for_date),
+                "includes_observations": used_observations  # Flag if actual temps from today were used
             }
 
             if include_meteorology:
@@ -350,10 +386,11 @@ class NWSAdapter:
                 stats["avg_wind_speed"] = sum(wind_speeds) / len(wind_speeds) if wind_speeds else 0
                 stats["avg_dewpoint"] = sum(dewpoints) / len(dewpoints) if dewpoints else None
 
+            obs_note = " (includes actual observations from today)" if used_observations else ""
             self.logger.info(
                 f"Temperature stats for {target_date}: "
                 f"min={stats['min']:.1f}°F, max={stats['max']:.1f}°F, "
-                f"avg={stats['avg']:.1f}°F ({stats['num_periods']} periods)"
+                f"avg={stats['avg']:.1f}°F ({stats['num_periods']} periods){obs_note}"
             )
 
             return stats

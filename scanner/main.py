@@ -127,25 +127,7 @@ class KalshiWeatherScanner:
 
                 forecast_periods = self.nws.get_forecast_for_city(city, state)
 
-                # Extract stats for target date with meteorological data
-                timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
-                forecast = self.nws.extract_temperature_stats_for_date(
-                    forecast_periods,
-                    parsed.date.isoformat(),
-                    timezone,
-                    include_meteorology=True  # Include sky cover, wind, dewpoint
-                )
-
-                if not forecast:
-                    self.logger.warning(f"  ⚠ No forecast data available for {parsed.date}")
-                    continue
-
-                self.logger.info(
-                    f"  ✓ Forecast: min={forecast['min']:.1f}°F, "
-                    f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
-                )
-
-                # Get current conditions and observations for boundary model
+                # Get current conditions and observations FIRST (needed for today's actual temps)
                 current_conditions = None
                 observations = None
 
@@ -158,6 +140,7 @@ class KalshiWeatherScanner:
                         current_conditions = self.nws.get_current_conditions(station_id)
 
                         # Fetch recent observations (last 48 hours)
+                        # Critical for today's markets - gives us actual temps from earlier today
                         observations = self.nws.get_observations(station_id, hours=48)
 
                         if current_conditions:
@@ -168,6 +151,26 @@ class KalshiWeatherScanner:
                             )
                     except Exception as e:
                         self.logger.warning(f"  ⚠ Could not fetch current conditions: {e}")
+
+                # Extract stats for target date with meteorological data
+                # Pass observations so we include actual temps from earlier today (if target_date is today)
+                timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
+                forecast = self.nws.extract_temperature_stats_for_date(
+                    forecast_periods,
+                    parsed.date.isoformat(),
+                    timezone,
+                    include_meteorology=True,  # Include sky cover, wind, dewpoint
+                    observations=observations   # Include actual observations for today
+                )
+
+                if not forecast:
+                    self.logger.warning(f"  ⚠ No forecast data available for {parsed.date}")
+                    continue
+
+                self.logger.info(
+                    f"  ✓ Forecast: min={forecast['min']:.1f}°F, "
+                    f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
+                )
 
                 # Detect mispricing
                 opp = self.detector.analyze_temperature_market(
