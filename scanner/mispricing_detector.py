@@ -748,7 +748,14 @@ class MispricingDetector:
             time_confidence = 0.60  # 6+ days out, more uncertainty
 
         # Adjust based on distance from threshold
-        forecast_value = forecast[parsed.metric]
+        # Map metric names: "minimum" → "min", "maximum" → "max", "average" → "avg"
+        metric_map = {
+            "minimum": "min",
+            "maximum": "max",
+            "average": "avg"
+        }
+        forecast_metric_key = metric_map.get(parsed.metric, parsed.metric)
+        forecast_value = forecast.get(forecast_metric_key, 0)
 
         if parsed.comparison == "between":
             # For "between", check distance to nearest boundary
@@ -791,8 +798,16 @@ class MispricingDetector:
         Returns:
             Reasoning string
         """
+        # Map metric names: "minimum" → "min", "maximum" → "max", "average" → "avg"
+        metric_map = {
+            "minimum": "min",
+            "maximum": "max",
+            "average": "avg"
+        }
+        forecast_metric_key = metric_map.get(parsed.metric, parsed.metric)
+        forecast_value = forecast.get(forecast_metric_key, 0)
+
         metric_str = f"forecast {parsed.metric}"
-        forecast_value = forecast[parsed.metric]
 
         reasoning_parts = []
 
