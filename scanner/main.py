@@ -127,12 +127,13 @@ class KalshiWeatherScanner:
 
                 forecast_periods = self.nws.get_forecast_for_city(city, state)
 
-                # Extract stats for target date
+                # Extract stats for target date with meteorological data
                 timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
                 forecast = self.nws.extract_temperature_stats_for_date(
                     forecast_periods,
                     parsed.date.isoformat(),
-                    timezone
+                    timezone,
+                    include_meteorology=True  # Include sky cover, wind, dewpoint
                 )
 
                 if not forecast:
@@ -144,8 +145,38 @@ class KalshiWeatherScanner:
                     f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
                 )
 
+                # Get current conditions and observations for boundary model
+                current_conditions = None
+                observations = None
+
+                location_info = self.nws.LOCATIONS.get(parsed.location)
+                if location_info and "station_id" in location_info:
+                    station_id = location_info["station_id"]
+
+                    try:
+                        # Fetch current conditions
+                        current_conditions = self.nws.get_current_conditions(station_id)
+
+                        # Fetch recent observations (last 48 hours)
+                        observations = self.nws.get_observations(station_id, hours=48)
+
+                        if current_conditions:
+                            self.logger.info(
+                                f"  ✓ Current: {current_conditions['temperature']:.1f}°F, "
+                                f"wind={current_conditions['wind_speed']:.1f}mph, "
+                                f"sky={current_conditions['sky_cover']}%"
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"  ⚠ Could not fetch current conditions: {e}")
+
                 # Detect mispricing
-                opp = self.detector.analyze_temperature_market(market, parsed, forecast)
+                opp = self.detector.analyze_temperature_market(
+                    market,
+                    parsed,
+                    forecast,
+                    current_conditions=current_conditions,
+                    observations=observations
+                )
 
                 if opp:
                     opportunities.append(opp)
