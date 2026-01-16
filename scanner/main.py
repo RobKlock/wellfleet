@@ -1,0 +1,242 @@
+"""
+Main Scanner Orchestrator
+Coordinates all components to scan for weather arbitrage opportunities
+"""
+
+import logging
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional
+
+from .kalshi_client import KalshiClient
+from .nws_adapter import NWSAdapter
+from .market_parser import MarketParser
+from .mispricing_detector import MispricingDetector, Opportunity
+from .report_generator import ReportGenerator
+
+
+class KalshiWeatherScanner:
+    """Main orchestrator for the Kalshi weather arbitrage scanner"""
+
+    def __init__(
+        self,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        api_key_id: Optional[str] = None,
+        private_key_path: Optional[str] = None,
+        bankroll: float = 1000.0,
+        kelly_fraction: float = 0.25,
+        min_edge_threshold: float = 0.20
+    ):
+        """
+        Initialize the scanner with all components
+
+        Args:
+            email: Kalshi account email (for email/password auth)
+            password: Kalshi account password (for email/password auth)
+            api_key_id: API key ID (for API key auth)
+            private_key_path: Path to private key file (for API key auth)
+            bankroll: Total capital available for betting
+            kelly_fraction: Fraction of Kelly criterion to use
+            min_edge_threshold: Minimum edge required to flag opportunities
+        """
+        # Initialize components
+        self.kalshi = KalshiClient(
+            email=email,
+            password=password,
+            api_key_id=api_key_id,
+            private_key_path=private_key_path
+        )
+        self.nws = NWSAdapter()
+        self.parser = MarketParser()
+        self.detector = MispricingDetector(
+            bankroll=bankroll,
+            kelly_fraction=kelly_fraction,
+            min_edge_threshold=min_edge_threshold
+        )
+        self.reporter = ReportGenerator()
+
+        # Setup logging
+        self.logger = logging.getLogger(__name__)
+
+    def scan(self) -> List[Opportunity]:
+        """
+        Main scanning process
+
+        Returns:
+            List of identified opportunities
+        """
+        self.logger.info("=" * 60)
+        self.logger.info("Starting Kalshi Weather Scanner")
+        self.logger.info("=" * 60)
+
+        # Step 1: Fetch promo markets
+        self.logger.info("Fetching promo markets from Kalshi...")
+        promo_markets = self.kalshi.get_promo_markets()
+        self.logger.info(f"Found {len(promo_markets)} promo markets")
+
+        # Step 2: Filter for weather markets in Denver/Miami
+        weather_markets = self._filter_weather_markets(promo_markets)
+        self.logger.info(f"Found {len(weather_markets)} weather markets for Denver/Miami")
+
+        if not weather_markets:
+            self.logger.info("No weather markets found. Scan complete.")
+            return []
+
+        # Step 3: Analyze each market
+        opportunities = []
+
+        for market in weather_markets:
+            self.logger.info(f"Analyzing: {market['title'][:80]}...")
+
+            try:
+                # Parse market
+                parsed = self.parser.parse(market["title"], market["ticker"])
+
+                if not parsed.is_parseable:
+                    self.logger.warning(f"  ⚠ Could not parse market: {market['ticker']}")
+                    continue
+
+                self.logger.info(
+                    f"  ✓ Parsed: {parsed.location}, {parsed.metric} "
+                    f"{parsed.comparison} {parsed.threshold}°F on {parsed.date}"
+                )
+
+                # Get NWS forecast
+                city, state = self._parse_location(parsed.location)
+                if not city or not state:
+                    self.logger.warning(f"  ⚠ Could not parse location: {parsed.location}")
+                    continue
+
+                forecast_periods = self.nws.get_forecast_for_city(city, state)
+
+                # Extract stats for target date
+                timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
+                forecast = self.nws.extract_temperature_stats_for_date(
+                    forecast_periods,
+                    parsed.date.isoformat(),
+                    timezone
+                )
+
+                if not forecast:
+                    self.logger.warning(f"  ⚠ No forecast data available for {parsed.date}")
+                    continue
+
+                self.logger.info(
+                    f"  ✓ Forecast: min={forecast['min']:.1f}°F, "
+                    f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
+                )
+
+                # Detect mispricing
+                opp = self.detector.analyze_temperature_market(market, parsed, forecast)
+
+                if opp:
+                    opportunities.append(opp)
+                    self.logger.info(
+                        f"  🎯 OPPORTUNITY: {opp.edge:+.1%} edge, "
+                        f"bet {opp.recommended_side} for ${opp.recommended_bet_size:.2f}"
+                    )
+                else:
+                    self.logger.info("  ✓ Market efficiently priced")
+
+            except Exception as e:
+                self.logger.error(f"  ✗ Error analyzing market: {e}", exc_info=True)
+                continue
+
+        self.logger.info("=" * 60)
+        self.logger.info(f"Scan complete. Found {len(opportunities)} opportunities.")
+        self.logger.info("=" * 60)
+
+        return opportunities
+
+    def _filter_weather_markets(self, markets: List[dict]) -> List[dict]:
+        """
+        Filter for weather markets in supported locations
+
+        Args:
+            markets: List of all markets
+
+        Returns:
+            List of weather markets for Denver/Miami
+        """
+        supported_locations = ["Denver", "Miami"]
+
+        weather_markets = []
+        for market in markets:
+            title = market["title"].lower()
+
+            # Check if it's a temperature market
+            if "temperature" not in title:
+                continue
+
+            # Check if it's for a supported location
+            if any(loc.lower() in title for loc in supported_locations):
+                weather_markets.append(market)
+
+        return weather_markets
+
+    def _parse_location(self, location: str) -> tuple:
+        """
+        Parse location string into city and state
+
+        Args:
+            location: Location string (e.g., "Denver, CO")
+
+        Returns:
+            Tuple of (city, state)
+        """
+        parts = location.split(",")
+        if len(parts) != 2:
+            return None, None
+
+        city = parts[0].strip()
+        state = parts[1].strip()
+
+        return city, state
+
+    def run_and_save(self, output_dir: str = "./reports") -> List[Opportunity]:
+        """
+        Run scan and save reports to disk
+
+        Args:
+            output_dir: Directory to save reports
+
+        Returns:
+            List of identified opportunities
+        """
+        # Create output directory
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+        # Run scan
+        opportunities = self.scan()
+
+        # Generate reports
+        report_md = self.reporter.generate_daily_report(opportunities)
+        report_csv = self.reporter.generate_csv_export(opportunities)
+
+        # Save files with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        md_path = f"{output_dir}/kalshi_report_{timestamp}.md"
+        with open(md_path, "w") as f:
+            f.write(report_md)
+        self.logger.info(f"Saved Markdown report: {md_path}")
+
+        csv_path = f"{output_dir}/kalshi_opportunities_{timestamp}.csv"
+        with open(csv_path, "w") as f:
+            f.write(report_csv)
+        self.logger.info(f"Saved CSV export: {csv_path}")
+
+        # Also save latest as current.md
+        current_path = f"{output_dir}/current.md"
+        with open(current_path, "w") as f:
+            f.write(report_md)
+        self.logger.info(f"Saved current report: {current_path}")
+
+        # Print summary
+        if opportunities:
+            summary = self.reporter.generate_summary(opportunities)
+            self.logger.info(f"\n{summary}\n")
+
+        return opportunities
