@@ -6,7 +6,10 @@ Handles authentication and market data retrieval from Kalshi's REST API
 import requests
 import logging
 import time
+import base64
 from typing import List, Dict, Optional
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 
 class AuthenticationError(Exception):
@@ -17,24 +20,92 @@ class AuthenticationError(Exception):
 class KalshiClient:
     """Client for interacting with Kalshi's trading API"""
 
-    def __init__(self, email: str, password: str):
+    def __init__(
+        self,
+        email: Optional[str] = None,
+        password: Optional[str] = None,
+        api_key_id: Optional[str] = None,
+        private_key_path: Optional[str] = None
+    ):
         """
         Initialize client and authenticate
 
+        Two authentication methods supported:
+        1. Email/Password (legacy)
+        2. API Key + Private Key (recommended)
+
         Args:
-            email: Kalshi account email
-            password: Kalshi account password
+            email: Kalshi account email (for email/password auth)
+            password: Kalshi account password (for email/password auth)
+            api_key_id: API key ID (for API key auth)
+            private_key_path: Path to private key file (for API key auth)
         """
         self.base_url = "https://api.elections.kalshi.com/trade-api/v2"
-        self.email = email
-        self.password = password
-        self.token = None
-        self.member_id = None
         self.session = requests.Session()
         self.logger = logging.getLogger(__name__)
 
-        # Authenticate on initialization
-        self.login()
+        # Authentication state
+        self.token = None
+        self.member_id = None
+        self.api_key_id = api_key_id
+        self.private_key = None
+
+        # Determine authentication method
+        if api_key_id and private_key_path:
+            # API Key authentication
+            self.auth_method = "api_key"
+            self._load_private_key(private_key_path)
+            self.logger.info("Using API key authentication")
+        elif email and password:
+            # Email/Password authentication
+            self.auth_method = "email_password"
+            self.email = email
+            self.password = password
+            self.login()
+        else:
+            raise AuthenticationError(
+                "Must provide either (api_key_id + private_key_path) or (email + password)"
+            )
+
+    def _load_private_key(self, private_key_path: str):
+        """Load RSA private key from file"""
+        try:
+            with open(private_key_path, 'rb') as f:
+                self.private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None
+                )
+            self.logger.info(f"Loaded private key from {private_key_path}")
+        except Exception as e:
+            raise AuthenticationError(f"Failed to load private key: {e}")
+
+    def _sign_request(self, timestamp: str, method: str, path: str) -> str:
+        """
+        Create RSA-PSS signature for API key authentication
+
+        Args:
+            timestamp: Request timestamp in milliseconds
+            method: HTTP method (GET, POST, etc.)
+            path: Request path without query parameters
+
+        Returns:
+            Base64-encoded signature
+        """
+        # Create message: timestamp + method + path
+        message = f"{timestamp}{method}{path}"
+
+        # Sign with RSA-PSS
+        signature = self.private_key.sign(
+            message.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.DIGEST_LENGTH
+            ),
+            hashes.SHA256()
+        )
+
+        # Encode to base64
+        return base64.b64encode(signature).decode('utf-8')
 
     def login(self) -> None:
         """
@@ -102,10 +173,25 @@ class KalshiClient:
 
         for attempt in range(max_retries):
             try:
+                # Prepare headers based on auth method
+                headers = {}
+
+                if self.auth_method == "api_key":
+                    # Add API key signature headers
+                    timestamp = str(int(time.time() * 1000))
+                    signature = self._sign_request(timestamp, method.upper(), endpoint)
+
+                    headers.update({
+                        "KALSHI-ACCESS-KEY": self.api_key_id,
+                        "KALSHI-ACCESS-TIMESTAMP": timestamp,
+                        "KALSHI-ACCESS-SIGNATURE": signature
+                    })
+
                 response = self.session.request(
                     method=method,
                     url=url,
                     params=params,
+                    headers=headers,
                     timeout=30
                 )
 

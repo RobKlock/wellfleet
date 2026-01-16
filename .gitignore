@@ -4,6 +4,11 @@ venv/
 __pycache__/
 *.pyc
 
+# API Keys
+kalshi_api_private_key.txt
+*_private_key.txt
+*.pem
+
 # Reports
 reports/
 

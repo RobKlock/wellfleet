@@ -216,20 +216,39 @@ def test_kalshi_client():
     logger.info("Testing KalshiClient")
     logger.info("="*60)
 
-    # Check for credentials
+    # Check for API key credentials (preferred method)
+    api_key_id = os.getenv("KALSHI_API_KEY_ID")
+    private_key_path = os.getenv("KALSHI_PRIVATE_KEY_PATH", "kalshi_api_private_key.txt")
+
+    # Fallback to email/password
     email = os.getenv("KALSHI_EMAIL")
     password = os.getenv("KALSHI_PASSWORD")
 
-    if not email or not password:
-        logger.warning("  ⚠ KALSHI_EMAIL and KALSHI_PASSWORD not set in .env")
+    if api_key_id and os.path.exists(private_key_path):
+        logger.info("Using API key authentication")
+        auth_kwargs = {
+            "api_key_id": api_key_id,
+            "private_key_path": private_key_path
+        }
+    elif email and password:
+        logger.info("Using email/password authentication")
+        auth_kwargs = {
+            "email": email,
+            "password": password
+        }
+    else:
+        logger.warning("  ⚠ No Kalshi credentials found in .env")
+        logger.warning("  ⚠ Need either:")
+        logger.warning("  ⚠   - KALSHI_API_KEY_ID + kalshi_api_private_key.txt")
+        logger.warning("  ⚠   - KALSHI_EMAIL + KALSHI_PASSWORD")
         logger.warning("  ⚠ Skipping KalshiClient tests")
         return True  # Don't fail if credentials aren't set
 
     # Test 1: Authentication
     logger.info("\nTest 1: Authentication...")
     try:
-        client = KalshiClient(email=email, password=password)
-        logger.info(f"  ✓ Authenticated successfully as member {client.member_id}")
+        client = KalshiClient(**auth_kwargs)
+        logger.info(f"  ✓ Authenticated successfully using {client.auth_method}")
     except Exception as e:
         logger.error(f"  ✗ Authentication failed: {e}")
         return False
