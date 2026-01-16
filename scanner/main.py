@@ -104,6 +104,8 @@ class KalshiWeatherScanner:
         opportunities = []
 
         for market in weather_markets:
+            self.logger.info("\n")
+            self.logger.info("-"*100)
             self.logger.info(f"Analyzing: {market['title'][:80]}...")
 
             try:
@@ -155,6 +157,7 @@ class KalshiWeatherScanner:
                     )
                 else:
                     self.logger.info("  ✓ Market efficiently priced")
+                    self.logger.info("_"*100)
 
             except Exception as e:
                 self.logger.error(f"  ✗ Error analyzing market: {e}", exc_info=True)
