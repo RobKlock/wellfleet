@@ -65,6 +65,15 @@ class MarketParser:
         re.IGNORECASE
     )
 
+    # Pattern 4: "Lowest/Highest temperature" format
+    # Example: "Will the lowest temperature in Denver be 26° or below on January 16?"
+    # Example ticker: KXLOWTDEN-26JAN16
+    PATTERN_LOWEST_HIGHEST = re.compile(
+        r"Will the (lowest|highest|average) temperature in ([A-Za-z\s,]+?) "
+        r"be (\d+)°? or (below|above) on ([A-Za-z]+ \d+)",
+        re.IGNORECASE
+    )
+
     def __init__(self):
         """Initialize the market parser"""
         self.logger = logging.getLogger(__name__)
@@ -94,6 +103,11 @@ class MarketParser:
         match = self.PATTERN_AT_LEAST.search(title)
         if match:
             return self._parse_at_least_most(match, ticker)
+
+        # Try Pattern 4: Lowest/Highest (without year)
+        match = self.PATTERN_LOWEST_HIGHEST.search(title)
+        if match:
+            return self._parse_lowest_highest(match, ticker)
 
         # Unable to parse
         self.logger.warning(f"Unable to parse market title: {title}")
@@ -176,4 +190,50 @@ class MarketParser:
             )
         except (ValueError, IndexError) as e:
             self.logger.error(f"Error parsing at least/most: {e}")
+            return ParsedMarket(ticker=ticker, is_parseable=False)
+
+    def _parse_lowest_highest(self, match: re.Match, ticker: str) -> ParsedMarket:
+        """Parse 'lowest/highest temperature' pattern (without year in date)"""
+        try:
+            metric_word = match.group(1).lower()  # "lowest", "highest", or "average"
+            location = match.group(2).strip()
+            threshold = float(match.group(3))
+            comparison = match.group(4).lower()  # "below" or "above"
+            date_str = match.group(5)  # e.g., "January 16"
+
+            # Convert metric word to standard form
+            if metric_word == "lowest":
+                metric = "minimum"
+            elif metric_word == "highest":
+                metric = "maximum"
+            else:
+                metric = "average"
+
+            # Parse date - add current year since it's not specified
+            # Format is "January 16" without year
+            current_year = datetime.now().year
+            try:
+                parsed_date = datetime.strptime(f"{date_str}, {current_year}", "%B %d, %Y").date()
+            except ValueError:
+                # If that fails, try next year (for dates that might have rolled over)
+                parsed_date = datetime.strptime(f"{date_str}, {current_year + 1}", "%B %d, %Y").date()
+
+            # Add state if just city name (Denver -> Denver, CO; Miami -> Miami, FL)
+            if "," not in location:
+                if "denver" in location.lower():
+                    location = "Denver, CO"
+                elif "miami" in location.lower():
+                    location = "Miami, FL"
+
+            return ParsedMarket(
+                ticker=ticker,
+                location=location,
+                metric=metric,
+                threshold=threshold,
+                comparison=comparison,
+                date=parsed_date,
+                is_parseable=True
+            )
+        except (ValueError, IndexError) as e:
+            self.logger.error(f"Error parsing lowest/highest: {e}")
             return ParsedMarket(ticker=ticker, is_parseable=False)

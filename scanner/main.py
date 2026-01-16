@@ -60,9 +60,12 @@ class KalshiWeatherScanner:
         # Setup logging
         self.logger = logging.getLogger(__name__)
 
-    def scan(self) -> List[Opportunity]:
+    def scan(self, specific_tickers: Optional[List[str]] = None) -> List[Opportunity]:
         """
         Main scanning process
+
+        Args:
+            specific_tickers: Optional list of specific market tickers to scan
 
         Returns:
             List of identified opportunities
@@ -71,17 +74,22 @@ class KalshiWeatherScanner:
         self.logger.info("Starting Kalshi Weather Scanner")
         self.logger.info("=" * 60)
 
-        # Step 1: Fetch promo markets
-        self.logger.info("Fetching promo markets from Kalshi...")
-        promo_markets = self.kalshi.get_promo_markets()
-        self.logger.info(f"Found {len(promo_markets)} promo markets")
+        # If specific tickers provided, scan those directly
+        if specific_tickers:
+            self.logger.info(f"Scanning {len(specific_tickers)} specific markets...")
+            weather_markets = self._fetch_specific_markets(specific_tickers)
+        else:
+            # Step 1: Fetch promo markets
+            self.logger.info("Fetching promo markets from Kalshi...")
+            promo_markets = self.kalshi.get_promo_markets()
+            self.logger.info(f"Found {len(promo_markets)} promo markets")
 
-        # Step 2: Filter for weather markets in Denver/Miami
-        weather_markets = self._filter_weather_markets(promo_markets)
-        self.logger.info(f"Found {len(weather_markets)} weather markets for Denver/Miami")
+            # Step 2: Filter for weather markets in Denver/Miami
+            weather_markets = self._filter_weather_markets(promo_markets)
+            self.logger.info(f"Found {len(weather_markets)} weather markets for Denver/Miami")
 
         if not weather_markets:
-            self.logger.info("No weather markets found. Scan complete.")
+            self.logger.warning("No weather markets found. Scan complete.")
             return []
 
         # Step 3: Analyze each market
@@ -150,6 +158,47 @@ class KalshiWeatherScanner:
 
         return opportunities
 
+    def _fetch_specific_markets(self, tickers: List[str]) -> List[dict]:
+        """
+        Fetch specific markets by ticker
+
+        Args:
+            tickers: List of market tickers to fetch
+
+        Returns:
+            List of market dictionaries
+        """
+        markets = []
+        for ticker in tickers:
+            try:
+                self.logger.info(f"Fetching market: {ticker}")
+                market = self.kalshi.get_market(ticker)
+
+                # Format market data to match promo_markets structure
+                formatted_market = {
+                    "ticker": market["ticker"],
+                    "title": market["title"],
+                    "event_ticker": market.get("event_ticker", ""),
+                    "close_time": market["close_time"],
+                    "expiration_time": market.get("expiration_time", ""),
+                    "yes_bid": market.get("yes_bid"),
+                    "yes_ask": market.get("yes_ask"),
+                    "no_bid": market.get("no_bid"),
+                    "no_ask": market.get("no_ask"),
+                    "volume": market.get("volume", 0),
+                    "liquidity_pool": market.get("liquidity_pool"),
+                    "category": market.get("category"),
+                    "status": market.get("status"),
+                }
+                markets.append(formatted_market)
+                self.logger.info(f"  ✓ Fetched: {market['title'][:70]}")
+
+            except Exception as e:
+                self.logger.error(f"  ✗ Failed to fetch {ticker}: {e}")
+                continue
+
+        return markets
+
     def _filter_weather_markets(self, markets: List[dict]) -> List[dict]:
         """
         Filter for weather markets in supported locations
@@ -166,8 +215,12 @@ class KalshiWeatherScanner:
         for market in markets:
             title = market["title"].lower()
 
-            # Check if it's a temperature market
-            if "temperature" not in title:
+            # Check if it's a temperature/weather market (broader search)
+            is_weather = any(keyword in title for keyword in [
+                "temperature", "weather", "lowest", "highest", "warmest", "coldest"
+            ])
+
+            if not is_weather:
                 continue
 
             # Check if it's for a supported location
