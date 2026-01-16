@@ -465,12 +465,22 @@ class MispricingDetector:
                 comparison=parsed.comparison
             )
 
-        # Get market prices (use bids since that's what we can actually get)
-        market_yes_price = market.get("yes_bid", 0)
-        market_no_price = market.get("no_bid", 0)
+        # Get market prices
+        # Prefer bids (what we can get), but fall back to asks (what we'd pay) if no bids
+        market_yes_bid = market.get("yes_bid", 0)
+        market_no_bid = market.get("no_bid", 0)
+        market_yes_ask = market.get("yes_ask", 0)
+        market_no_ask = market.get("no_ask", 0)
+
+        # Use bids if available, otherwise use asks
+        market_yes_price = market_yes_bid if market_yes_bid > 0 else market_yes_ask
+        market_no_price = market_no_bid if market_no_bid > 0 else market_no_ask
+
+        # Track if we're using asks (lower liquidity)
+        using_asks = (market_yes_bid == 0 or market_no_bid == 0)
 
         if market_yes_price == 0 or market_no_price == 0:
-            self.logger.warning(f"Market {market['ticker']} has zero bid prices")
+            self.logger.warning(f"Market {market['ticker']} has no bid or ask prices")
             return None
 
         # Calculate edge for both sides
@@ -481,11 +491,13 @@ class MispricingDetector:
         if yes_edge > self.min_edge_threshold:
             recommended_side = "YES"
             edge = yes_edge
-            bet_price = market.get("yes_ask", market_yes_price)  # We'd pay the ask
+            # We'd pay the ask to buy
+            bet_price = market_yes_ask if market_yes_ask > 0 else market_yes_price
         elif no_edge > self.min_edge_threshold:
             recommended_side = "NO"
             edge = no_edge
-            bet_price = market.get("no_ask", market_no_price)
+            # We'd pay the ask to buy
+            bet_price = market_no_ask if market_no_ask > 0 else market_no_price
         else:
             # No significant edge
             self.logger.debug(
@@ -513,6 +525,10 @@ class MispricingDetector:
             market_price=market_yes_price if recommended_side == "YES" else market_no_price,
             recommended_side=recommended_side
         )
+
+        # Add liquidity warning if using asks
+        if using_asks:
+            reasoning += " [LOW LIQUIDITY: No bids available, using ask prices]"
 
         # Create opportunity
         return Opportunity(
