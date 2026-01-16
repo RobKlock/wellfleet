@@ -465,12 +465,13 @@ class MispricingDetector:
                 comparison=parsed.comparison
             )
 
-        # Get market prices
+        # Get market prices (Kalshi API returns prices in cents 0-100)
+        # Convert to decimal form (0-1.0) by dividing by 100
         # Prefer bids (what we can get), but fall back to asks (what we'd pay) if no bids
-        market_yes_bid = market.get("yes_bid", 0)
-        market_no_bid = market.get("no_bid", 0)
-        market_yes_ask = market.get("yes_ask", 0)
-        market_no_ask = market.get("no_ask", 0)
+        market_yes_bid = market.get("yes_bid", 0) / 100.0 if market.get("yes_bid", 0) else 0
+        market_no_bid = market.get("no_bid", 0) / 100.0 if market.get("no_bid", 0) else 0
+        market_yes_ask = market.get("yes_ask", 0) / 100.0 if market.get("yes_ask", 0) else 0
+        market_no_ask = market.get("no_ask", 0) / 100.0 if market.get("no_ask", 0) else 0
 
         # Use bids if available, otherwise use asks
         market_yes_price = market_yes_bid if market_yes_bid > 0 else market_yes_ask
