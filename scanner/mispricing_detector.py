@@ -435,35 +435,84 @@ class MispricingDetector:
             )
             return None
 
-        # Determine if this is a boundary case (within ±3°F of threshold)
-        is_boundary_case = self._is_boundary_case(
-            forecast_value=forecast_value,
-            threshold=parsed.threshold,
-            threshold_high=parsed.threshold_high,
-            comparison=parsed.comparison
-        )
-
-        # Calculate true probability
-        if is_boundary_case and self.boundary_model and (current_conditions or observations):
-            # Use enhanced boundary model
-            self.logger.info(f"Using boundary model for {market['ticker']} (boundary case)")
-            true_prob = self.boundary_model.calculate_boundary_probability(
-                forecast_value=forecast_value,
-                threshold=parsed.threshold,
-                threshold_high=parsed.threshold_high,
-                comparison=parsed.comparison,
-                current_conditions=current_conditions,
-                observations=observations,
-                forecast_stats=forecast
+        # CRITICAL: Check if observations from today already determine the outcome
+        # For intraday markets, once we've observed a certain min/max, that constrains the answer
+        if forecast.get("includes_observations"):
+            constrained_prob = self._check_observation_constraints(
+                forecast=forecast,
+                parsed=parsed,
+                forecast_metric_key=forecast_metric_key
             )
+            if constrained_prob is not None:
+                # Observations definitively answer the question
+                self.logger.info(
+                    f"Market {market['ticker']} outcome constrained by observations: "
+                    f"prob={constrained_prob:.1%}"
+                )
+                true_prob = constrained_prob
+                # Skip probabilistic calculation - we know the answer from observations
+            else:
+                # Observations don't constrain - continue with normal probability calculation
+                # Determine if this is a boundary case (within ±3°F of threshold)
+                is_boundary_case = self._is_boundary_case(
+                    forecast_value=forecast_value,
+                    threshold=parsed.threshold,
+                    threshold_high=parsed.threshold_high,
+                    comparison=parsed.comparison
+                )
+
+                # Calculate true probability
+                if is_boundary_case and self.boundary_model and (current_conditions or observations):
+                    # Use enhanced boundary model
+                    self.logger.info(f"Using boundary model for {market['ticker']} (boundary case)")
+                    true_prob = self.boundary_model.calculate_boundary_probability(
+                        forecast_value=forecast_value,
+                        threshold=parsed.threshold,
+                        threshold_high=parsed.threshold_high,
+                        comparison=parsed.comparison,
+                        current_conditions=current_conditions,
+                        observations=observations,
+                        forecast_stats=forecast
+                    )
+                else:
+                    # Use simple heuristic model
+                    true_prob = self._calculate_probability(
+                        forecast_value=forecast_value,
+                        threshold=parsed.threshold,
+                        threshold_high=parsed.threshold_high,
+                        comparison=parsed.comparison
+                    )
         else:
-            # Use simple heuristic model
-            true_prob = self._calculate_probability(
+            # No observations from today - use normal probability calculation
+            # Determine if this is a boundary case (within ±3°F of threshold)
+            is_boundary_case = self._is_boundary_case(
                 forecast_value=forecast_value,
                 threshold=parsed.threshold,
                 threshold_high=parsed.threshold_high,
                 comparison=parsed.comparison
             )
+
+            # Calculate true probability
+            if is_boundary_case and self.boundary_model and (current_conditions or observations):
+                # Use enhanced boundary model
+                self.logger.info(f"Using boundary model for {market['ticker']} (boundary case)")
+                true_prob = self.boundary_model.calculate_boundary_probability(
+                    forecast_value=forecast_value,
+                    threshold=parsed.threshold,
+                    threshold_high=parsed.threshold_high,
+                    comparison=parsed.comparison,
+                    current_conditions=current_conditions,
+                    observations=observations,
+                    forecast_stats=forecast
+                )
+            else:
+                # Use simple heuristic model
+                true_prob = self._calculate_probability(
+                    forecast_value=forecast_value,
+                    threshold=parsed.threshold,
+                    threshold_high=parsed.threshold_high,
+                    comparison=parsed.comparison
+                )
 
         # Get market prices (Kalshi API returns prices in cents 0-100)
         # Convert to decimal form (0-1.0) by dividing by 100
@@ -552,6 +601,109 @@ class MispricingDetector:
             liquidity_pool_size=(market.get("liquidity_pool") or {}).get("pool_size", 0),
             close_time=datetime.fromisoformat(market["close_time"].replace('Z', '+00:00'))
         )
+
+    def _check_observation_constraints(
+        self,
+        forecast: Dict,
+        parsed: ParsedMarket,
+        forecast_metric_key: str
+    ) -> Optional[float]:
+        """
+        Check if observations from today already determine the market outcome
+
+        Key insight: Minimums can only go lower, maximums can only go higher
+        - If observed_min < threshold and market asks "min > threshold" → Definite NO
+        - If observed_max > threshold and market asks "max < threshold" → Definite NO
+
+        Args:
+            forecast: Forecast dict with min/max/avg and includes_observations flag
+            parsed: Parsed market information
+            forecast_metric_key: The metric key to use ("min", "max", or "avg")
+
+        Returns:
+            Probability if constrained (0.05 for NO, 0.95 for YES), None if not constrained
+        """
+        observed_value = forecast.get(forecast_metric_key)
+        if observed_value is None:
+            return None
+
+        threshold = parsed.threshold
+        threshold_high = parsed.threshold_high
+        comparison = parsed.comparison
+
+        # For MINIMUM temperature markets
+        if parsed.metric == "minimum":
+            if comparison in ["above", "at least"]:
+                # Market asks: "Will minimum be >= threshold?"
+                # If observed_min < threshold, minimum is ALREADY below threshold
+                # Minimum can only go lower, so answer is definitely NO
+                if observed_value < threshold:
+                    self.logger.info(
+                        f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
+                        f"(minimum can only go lower) → Definite NO"
+                    )
+                    return 0.05  # Definite NO (5% for uncertainty)
+
+            elif comparison == "below":
+                # Market asks: "Will minimum be < threshold?"
+                # If observed_min < threshold, answer is ALREADY YES
+                if observed_value < threshold:
+                    self.logger.info(
+                        f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
+                        f"(already below) → Definite YES"
+                    )
+                    return 0.95  # Definite YES
+
+            elif comparison == "between":
+                # Market asks: "Will minimum be between threshold and threshold_high?"
+                # If observed_min < threshold, minimum is ALREADY too low
+                if observed_value < threshold:
+                    self.logger.info(
+                        f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
+                        f"(already below range) → Definite NO"
+                    )
+                    return 0.05  # Definite NO
+                # If observed_min > threshold_high, minimum is ALREADY too high
+                # (but minimum can still drop into range)
+                # So we DON'T constrain this case
+
+        # For MAXIMUM temperature markets
+        elif parsed.metric == "maximum":
+            if comparison in ["above", "at least"]:
+                # Market asks: "Will maximum be >= threshold?"
+                # If observed_max >= threshold, answer is ALREADY YES
+                if observed_value >= threshold:
+                    self.logger.info(
+                        f"Observed maximum {observed_value:.1f}°F >= {threshold}°F "
+                        f"(already above) → Definite YES"
+                    )
+                    return 0.95  # Definite YES
+
+            elif comparison == "below":
+                # Market asks: "Will maximum be < threshold?"
+                # If observed_max >= threshold, maximum is ALREADY at/above threshold
+                # Maximum can only go higher, so answer is definitely NO
+                if observed_value >= threshold:
+                    self.logger.info(
+                        f"Observed maximum {observed_value:.1f}°F >= {threshold}°F "
+                        f"(maximum can only go higher) → Definite NO"
+                    )
+                    return 0.05  # Definite NO
+
+            elif comparison == "between":
+                # Market asks: "Will maximum be between threshold and threshold_high?"
+                # If observed_max > threshold_high, maximum is ALREADY too high
+                if threshold_high and observed_value > threshold_high:
+                    self.logger.info(
+                        f"Observed maximum {observed_value:.1f}°F > {threshold_high}°F "
+                        f"(already above range) → Definite NO"
+                    )
+                    return 0.05  # Definite NO
+                # If observed_max < threshold, maximum might still rise into range
+                # So we DON'T constrain this case
+
+        # No constraints apply - observations don't definitively answer the question
+        return None
 
     def _is_boundary_case(
         self,
