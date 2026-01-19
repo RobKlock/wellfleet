@@ -8,6 +8,7 @@ from .nws_adapter import NWSAdapter
 from .market_parser import MarketParser, ParsedMarket
 from .mispricing_detector import MispricingDetector, Opportunity
 from .report_generator import ReportGenerator
+from .portfolio_optimizer import PortfolioOptimizer, PortfolioGroup, HedgingStrategy
 from .main import KalshiWeatherScanner
 
 __all__ = [
@@ -18,5 +19,8 @@ __all__ = [
     'MispricingDetector',
     'Opportunity',
     'ReportGenerator',
+    'PortfolioOptimizer',
+    'PortfolioGroup',
+    'HedgingStrategy',
     'KalshiWeatherScanner',
 ]
