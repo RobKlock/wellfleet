@@ -603,6 +603,86 @@ class NWSAdapter:
             "recommendation": recommendation
         }
 
+    def get_preliminary_climate_report(self, station_id: str, date_str: str) -> Optional[Dict]:
+        """
+        Fetch preliminary Climate Report (CLI product) from NWS text products
+
+        The CLI report is issued around 7:30 AM and contains the preliminary min/max
+        based on the Daily Summary Message (DSM). This is more reliable than
+        individual METAR observations due to quality control.
+
+        Args:
+            station_id: Station ID (e.g., "KDEN")
+            date_str: Date in YYYY-MM-DD format
+
+        Returns:
+            Dictionary with preliminary min/max or None if not available
+
+        Note: ASOS uses 5-minute running averages, not instantaneous readings.
+        Display values are rounded but internal precision is higher.
+        """
+        # Map station IDs to NWS site codes
+        # KDEN -> BOU (Boulder NWS office)
+        # KMIA -> MFL (Miami NWS office)
+        site_map = {
+            "KDEN": "BOU",
+            "KMIA": "MFL",
+            "KCYS": "CYS"
+        }
+
+        site = site_map.get(station_id)
+        if not site:
+            self.logger.warning(f"No NWS site mapping for station {station_id}")
+            return None
+
+        # Format: https://forecast.weather.gov/product.php?site=BOU&product=CLI&issuedby=DEN
+        station_code = station_id[1:]  # Remove 'K' prefix
+        url = f"{self.base_url.replace('api.', '')}/product.php"
+        params = {
+            "site": site,
+            "product": "CLI",
+            "issuedby": station_code
+        }
+
+        try:
+            self.logger.info(f"Fetching preliminary CLI for {station_id} on {date_str}")
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+
+            # Parse the text report
+            text = response.text
+
+            # Look for temperature section
+            # Example: "  MINIMUM         20    535 AM -20    1883  19      1      -11"
+            import re
+            min_pattern = r"MINIMUM\s+(\d+)\s+(\d+)\s+(AM|PM)"
+            max_pattern = r"MAXIMUM\s+(\d+)\s+(\d+)\s+(AM|PM)"
+
+            min_match = re.search(min_pattern, text)
+            max_match = re.search(max_pattern, text)
+
+            result = {}
+
+            if min_match:
+                result["preliminary_min"] = float(min_match.group(1))
+                result["min_time"] = f"{min_match.group(2)} {min_match.group(3)}"
+                self.logger.info(
+                    f"Preliminary CLI: MIN={result['preliminary_min']}°F at {result['min_time']}"
+                )
+
+            if max_match:
+                result["preliminary_max"] = float(max_match.group(1))
+                result["max_time"] = f"{max_match.group(2)} {max_match.group(3)}"
+                self.logger.info(
+                    f"Preliminary CLI: MAX={result['preliminary_max']}°F at {result['max_time']}"
+                )
+
+            return result if result else None
+
+        except Exception as e:
+            self.logger.warning(f"Could not fetch preliminary CLI: {e}")
+            return None
+
     def get_forecast_stats_for_city_and_date(
         self,
         city: str,

@@ -708,6 +708,8 @@ class MispricingDetector:
         1. Minimums can only go lower, maximums can only go higher
         2. Peak times: minimums occur 5-7am, maximums occur 2-4pm
         3. Kalshi uses integer thresholds with rounding (21.2°F ≈ 21°F)
+        4. ASOS uses 5-minute running averages, not instantaneous temps
+        5. Preliminary CLI reports are more reliable than individual METAR observations
 
         Args:
             forecast: Forecast dict with min/max/avg and includes_observations flag
@@ -741,9 +743,44 @@ class MispricingDetector:
         threshold_high = parsed.threshold_high
         comparison = parsed.comparison
 
+        # ASOS UNCERTAINTY: ASOS uses 5-minute running averages, not instantaneous temps
+        # Display values are rounded integers, but internal precision is higher
+        # Example: Displayed "19°F" could be 18.5-19.4°F (rounds to 19) OR 19.5-19.9°F (rounds to 20 in final CLI)
+        #
+        # CRITICAL: When observed value is within 1°F of a threshold, there's ASOS uncertainty!
+        # The displayed integer value may round differently in the final Climate Report.
+        ASOS_UNCERTAINTY_RANGE = 1.0  # ±1°F uncertainty zone for ASOS averaging/rounding
+
         # Rounding tolerance: Kalshi uses integer temps, allow ±0.5°F for edge cases
         # Example: 21.2°F should match "20-21°F" range (rounds to 21°F)
         ROUNDING_TOLERANCE = 0.5
+
+        # WARNING: Check if we're in the ASOS uncertainty zone
+        in_uncertainty_zone = False
+        if comparison in ["above", "at least", "below", "at most"]:
+            distance_to_threshold = abs(observed_value - threshold)
+            if distance_to_threshold <= ASOS_UNCERTAINTY_RANGE:
+                in_uncertainty_zone = True
+                self.logger.warning(
+                    f"⚠️ ASOS UNCERTAINTY: Observed {observed_value:.1f}°F is within {distance_to_threshold:.1f}°F "
+                    f"of threshold {threshold}°F. Displayed value may round differently in final CLI!"
+                )
+        elif comparison == "between" and threshold_high:
+            dist_to_lower = abs(observed_value - threshold)
+            dist_to_upper = abs(observed_value - threshold_high)
+            if dist_to_lower <= ASOS_UNCERTAINTY_RANGE or dist_to_upper <= ASOS_UNCERTAINTY_RANGE:
+                in_uncertainty_zone = True
+                self.logger.warning(
+                    f"⚠️ ASOS UNCERTAINTY: Observed {observed_value:.1f}°F is near range boundary "
+                    f"[{threshold}°F-{threshold_high}°F]. May round differently in final CLI!"
+                )
+
+        # If in uncertainty zone, reduce confidence significantly
+        # The final Climate Report could show a different value due to 5-minute averaging + rounding
+        if in_uncertainty_zone:
+            uncertainty_factor = 0.30  # Reduce confidence by 30% when in uncertainty zone
+        else:
+            uncertainty_factor = 0.0
 
         # For MINIMUM temperature markets
         if parsed.metric == "minimum":
@@ -752,11 +789,12 @@ class MispricingDetector:
                 # If observed_min < threshold, minimum is ALREADY below threshold
                 # Minimum can only go lower, so answer is definitely NO
                 if observed_value < threshold - ROUNDING_TOLERANCE:
-                    confidence = 0.95 if past_minimum_peak else 0.90
+                    base_confidence = 0.95 if past_minimum_peak else 0.90
+                    confidence = base_confidence * (1 - uncertainty_factor)  # Reduce if in uncertainty zone
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
                         f"(minimum can only go lower, past peak: {past_minimum_peak}) → "
-                        f"Definite NO ({(1-confidence)*100:.0f}% uncertainty)"
+                        f"Definite NO (confidence: {confidence:.1%}, uncertainty: {(1-confidence)*100:.0f}%)"
                     )
                     return 1 - confidence  # Definite NO
 
@@ -764,7 +802,8 @@ class MispricingDetector:
                 # Market asks: "Will minimum be < threshold?"
                 # If observed_min < threshold, answer is ALREADY YES
                 if observed_value < threshold - ROUNDING_TOLERANCE:
-                    confidence = 0.95 if past_minimum_peak else 0.90
+                    base_confidence = 0.95 if past_minimum_peak else 0.90
+                    confidence = base_confidence * (1 - uncertainty_factor)
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
                         f"(already below, past peak: {past_minimum_peak}) → "
@@ -777,7 +816,8 @@ class MispricingDetector:
                 # With rounding tolerance: check if clearly outside range
                 if observed_value < threshold - ROUNDING_TOLERANCE:
                     # Clearly below range
-                    confidence = 0.95 if past_minimum_peak else 0.90
+                    base_confidence = 0.95 if past_minimum_peak else 0.90
+                    confidence = base_confidence * (1 - uncertainty_factor)
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
                         f"(already below range, past peak: {past_minimum_peak}) → "
@@ -788,11 +828,13 @@ class MispricingDetector:
                 elif threshold_high and threshold - ROUNDING_TOLERANCE <= observed_value <= threshold_high + ROUNDING_TOLERANCE:
                     # Within range (with rounding tolerance), and past peak time
                     if past_minimum_peak:
+                        base_confidence = 0.95
+                        confidence = base_confidence * (1 - uncertainty_factor)
                         self.logger.info(
                             f"Observed minimum {observed_value:.1f}°F in range [{threshold}°F, {threshold_high}°F] "
-                            f"and past peak time ({current_hour:02d}:00) → Definite YES"
+                            f"and past peak time ({current_hour:02d}:00) → Definite YES (confidence: {confidence:.1%})"
                         )
-                        return 0.95  # Definite YES - minimum is locked in within range
+                        return confidence  # Definite YES - minimum is locked in within range
 
         # For MAXIMUM temperature markets
         elif parsed.metric == "maximum":
@@ -837,11 +879,13 @@ class MispricingDetector:
                 elif threshold_high and threshold - ROUNDING_TOLERANCE <= observed_value <= threshold_high + ROUNDING_TOLERANCE:
                     # Within range (with rounding tolerance), and past peak time
                     if past_maximum_peak:
+                        base_confidence = 0.95
+                        confidence = base_confidence * (1 - uncertainty_factor)
                         self.logger.info(
                             f"Observed maximum {observed_value:.1f}°F in range [{threshold}°F, {threshold_high}°F] "
-                            f"and past peak time ({current_hour:02d}:00) → Definite YES"
+                            f"and past peak time ({current_hour:02d}:00) → Definite YES (confidence: {confidence:.1%})"
                         )
-                        return 0.95  # Definite YES - maximum is locked in within range
+                        return confidence  # Definite YES - maximum is locked in within range
 
         # No constraints apply - observations don't definitively answer the question
         return None
