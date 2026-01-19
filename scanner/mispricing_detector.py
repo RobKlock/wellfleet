@@ -393,13 +393,94 @@ class MispricingDetector:
         else:
             self.boundary_model = None
 
+    def _apply_leading_indicator_adjustment(
+        self,
+        base_forecast_value: float,
+        parsed: ParsedMarket,
+        leading_indicator_insights: Optional[Dict]
+    ) -> float:
+        """
+        Adjust forecast value based on leading indicator station trends
+
+        For example, if Cheyenne shows a strong cooling trend, we expect Denver's
+        minimum to drop lower than the base forecast suggests.
+
+        Args:
+            base_forecast_value: Base NWS forecast value (min/max/avg in °F)
+            parsed: Parsed market information
+            leading_indicator_insights: Leading indicator data from NWS adapter
+
+        Returns:
+            Adjusted forecast value in °F
+        """
+        if not leading_indicator_insights or not leading_indicator_insights.get("has_leading_indicators"):
+            return base_forecast_value
+
+        recommendation = leading_indicator_insights.get("recommendation")
+        if recommendation == "no_change":
+            return base_forecast_value
+
+        # Get the magnitude of the trend from the leading indicator
+        insights = leading_indicator_insights.get("insights", [])
+        if not insights:
+            return base_forecast_value
+
+        # Use the first (primary) leading indicator's rate
+        primary_insight = insights[0]
+        rate_per_hour = primary_insight.get("rate_per_hour", 0)
+
+        # Estimate how much the temperature might change over next 3-6 hours
+        # (typical lag time between Cheyenne and Denver weather)
+        lag_hours = 4  # Conservative estimate
+        expected_change = rate_per_hour * lag_hours
+
+        # Apply adjustment based on metric type
+        adjusted_value = base_forecast_value
+
+        if parsed.metric == "minimum":
+            # Minimums can only go lower
+            if recommendation == "expect_cooling":
+                # Cheyenne is cooling rapidly, Denver minimum likely to drop more
+                adjusted_value = base_forecast_value + expected_change  # expected_change is negative
+                self.logger.info(
+                    f"Leading indicator shows cooling at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting minimum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+            elif recommendation == "expect_warming":
+                # Cheyenne is warming, Denver minimum less likely to drop as low
+                adjusted_value = base_forecast_value + (expected_change * 0.5)  # Partial adjustment
+                self.logger.info(
+                    f"Leading indicator shows warming at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting minimum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+
+        elif parsed.metric == "maximum":
+            # Maximums can only go higher
+            if recommendation == "expect_warming":
+                # Cheyenne is warming rapidly, Denver maximum likely to rise more
+                adjusted_value = base_forecast_value + expected_change  # expected_change is positive
+                self.logger.info(
+                    f"Leading indicator shows warming at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting maximum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+            elif recommendation == "expect_cooling":
+                # Cheyenne is cooling, Denver maximum less likely to rise as high
+                adjusted_value = base_forecast_value + (expected_change * 0.5)  # Partial adjustment
+                self.logger.info(
+                    f"Leading indicator shows cooling at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting maximum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+
+        return adjusted_value
+
     def analyze_temperature_market(
         self,
         market: Dict,
         parsed: ParsedMarket,
         forecast: Dict,
         current_conditions: Optional[Dict] = None,
-        observations: Optional[List[Dict]] = None
+        observations: Optional[List[Dict]] = None,
+        leading_indicator_insights: Optional[Dict] = None
     ) -> Optional[Opportunity]:
         """
         Analyze a temperature market for mispricing
@@ -410,6 +491,7 @@ class MispricingDetector:
             forecast: Temperature forecast statistics
             current_conditions: Current weather conditions (for boundary model)
             observations: Recent temperature observations (for boundary model)
+            leading_indicator_insights: Leading indicator data from upstream stations
 
         Returns:
             Opportunity object if significant mispricing found, None otherwise
@@ -434,6 +516,17 @@ class MispricingDetector:
                 f"for {market['ticker']}"
             )
             return None
+
+        # Apply leading indicator adjustment if available
+        # This adjusts the forecast based on upstream weather patterns (e.g., Cheyenne → Denver)
+        adjusted_forecast_value = self._apply_leading_indicator_adjustment(
+            base_forecast_value=forecast_value,
+            parsed=parsed,
+            leading_indicator_insights=leading_indicator_insights
+        )
+
+        # Use adjusted value for probability calculations
+        forecast_value = adjusted_forecast_value
 
         # CRITICAL: Check if observations from today already determine the outcome
         # For intraday markets, once we've observed a certain min/max, that constrains the answer

@@ -26,7 +26,19 @@ class NWSAdapter:
             "lon": -80.1918,
             "timezone": "America/New_York",
             "station_id": "KMIA"
+        },
+        "Cheyenne, WY": {
+            "lat": 41.1520,
+            "lon": -104.8061,
+            "timezone": "America/Denver",
+            "station_id": "KCYS"
         }
+    }
+
+    # Leading indicator relationships: which stations can predict weather for which locations
+    # Format: {target_location: [list of leading indicator stations]}
+    LEADING_INDICATORS = {
+        "Denver, CO": ["KCYS"],  # Cheyenne weather often precedes Denver by a few hours
     }
 
     def __init__(self, user_agent: str = "KalshiWeatherScanner/1.0"):
@@ -401,6 +413,195 @@ class NWSAdapter:
         except Exception as e:
             self.logger.error(f"Error extracting temperature stats: {e}")
             return None
+
+    def analyze_temperature_trend(
+        self,
+        observations: List[Dict],
+        hours_back: int = 6
+    ) -> Dict:
+        """
+        Analyze temperature trend from recent observations
+
+        Detects if temperature is rising, falling, or stable, and calculates
+        the rate of change. Useful for detecting incoming weather systems.
+
+        Args:
+            observations: List of observation dictionaries with timestamps and temperatures
+            hours_back: How many hours back to analyze (default: 6)
+
+        Returns:
+            Dictionary with trend analysis:
+            - trend: "rising", "falling", or "stable"
+            - rate_per_hour: Temperature change in °F per hour
+            - change_total: Total temperature change over the period
+            - hours_analyzed: Actual hours of data analyzed
+            - current_temp: Most recent temperature
+            - oldest_temp: Temperature at start of analysis period
+        """
+        if not observations:
+            return {
+                "trend": "unknown",
+                "rate_per_hour": 0,
+                "change_total": 0,
+                "hours_analyzed": 0,
+                "current_temp": None,
+                "oldest_temp": None
+            }
+
+        # Sort observations by timestamp (newest first)
+        sorted_obs = sorted(
+            observations,
+            key=lambda x: x.get("timestamp", ""),
+            reverse=True
+        )
+
+        # Get current (most recent) temperature
+        current_temp = sorted_obs[0].get("temperature")
+        current_time = datetime.fromisoformat(sorted_obs[0].get("timestamp").replace('Z', '+00:00'))
+
+        # Find temperature from hours_back ago
+        cutoff_time = current_time.timestamp() - (hours_back * 3600)
+
+        # Find the observation closest to hours_back ago
+        oldest_temp = None
+        oldest_time = None
+        for obs in reversed(sorted_obs):
+            obs_time_str = obs.get("timestamp")
+            if not obs_time_str:
+                continue
+            obs_time = datetime.fromisoformat(obs_time_str.replace('Z', '+00:00'))
+
+            if obs_time.timestamp() <= cutoff_time:
+                oldest_temp = obs.get("temperature")
+                oldest_time = obs_time
+                break
+
+        # If we didn't find an observation old enough, use the oldest available
+        if oldest_temp is None and len(sorted_obs) > 1:
+            oldest_obs = sorted_obs[-1]
+            oldest_temp = oldest_obs.get("temperature")
+            oldest_time = datetime.fromisoformat(oldest_obs.get("timestamp").replace('Z', '+00:00'))
+
+        if oldest_temp is None or current_temp is None:
+            return {
+                "trend": "unknown",
+                "rate_per_hour": 0,
+                "change_total": 0,
+                "hours_analyzed": 0,
+                "current_temp": current_temp,
+                "oldest_temp": None
+            }
+
+        # Calculate temperature change
+        change_total = current_temp - oldest_temp
+        hours_analyzed = (current_time.timestamp() - oldest_time.timestamp()) / 3600
+        rate_per_hour = change_total / hours_analyzed if hours_analyzed > 0 else 0
+
+        # Determine trend (±1°F/hour is significant)
+        if rate_per_hour > 1.0:
+            trend = "rising"
+        elif rate_per_hour < -1.0:
+            trend = "falling"
+        else:
+            trend = "stable"
+
+        self.logger.info(
+            f"Temperature trend: {trend} at {rate_per_hour:.1f}°F/hr "
+            f"(from {oldest_temp:.1f}°F to {current_temp:.1f}°F over {hours_analyzed:.1f}hrs)"
+        )
+
+        return {
+            "trend": trend,
+            "rate_per_hour": rate_per_hour,
+            "change_total": change_total,
+            "hours_analyzed": hours_analyzed,
+            "current_temp": current_temp,
+            "oldest_temp": oldest_temp
+        }
+
+    def get_leading_indicator_insights(
+        self,
+        target_station_id: str,
+        target_city_state: str
+    ) -> Optional[Dict]:
+        """
+        Check leading indicator stations for incoming weather patterns
+
+        For example, Cheyenne, WY weather often precedes Denver, CO weather
+        by a few hours due to prevailing wind patterns.
+
+        Args:
+            target_station_id: Station ID for the target location (e.g., "KDEN")
+            target_city_state: City and state key (e.g., "Denver, CO")
+
+        Returns:
+            Dictionary with leading indicator insights:
+            - has_leading_indicators: bool
+            - leading_stations: list of station IDs
+            - insights: list of dictionaries with trend data for each leading station
+            - recommendation: "expect_warming", "expect_cooling", or "no_change"
+        """
+        # Check if this location has leading indicators
+        leading_station_ids = self.LEADING_INDICATORS.get(target_city_state, [])
+
+        if not leading_station_ids:
+            return {
+                "has_leading_indicators": False,
+                "leading_stations": [],
+                "insights": [],
+                "recommendation": "no_change"
+            }
+
+        # Get observations from target station
+        target_obs = self.get_observations(target_station_id, hours=200)
+        target_trend = self.analyze_temperature_trend(target_obs, hours_back=6)
+
+        insights = []
+        for leading_station_id in leading_station_ids:
+            # Get observations from leading indicator station
+            leading_obs = self.get_observations(leading_station_id, hours=200)
+            leading_trend = self.analyze_temperature_trend(leading_obs, hours_back=6)
+
+            # Calculate temperature difference between stations
+            temp_diff = None
+            if leading_trend["current_temp"] and target_trend["current_temp"]:
+                temp_diff = leading_trend["current_temp"] - target_trend["current_temp"]
+
+            insights.append({
+                "station_id": leading_station_id,
+                "trend": leading_trend["trend"],
+                "rate_per_hour": leading_trend["rate_per_hour"],
+                "current_temp": leading_trend["current_temp"],
+                "temp_diff_from_target": temp_diff
+            })
+
+        # Determine recommendation based on leading indicator trends
+        recommendation = "no_change"
+
+        # If leading indicator shows strong cooling/warming trend that target doesn't have yet
+        for insight in insights:
+            if insight["trend"] == "falling" and target_trend["trend"] != "falling":
+                if insight["rate_per_hour"] < -2.0:  # Significant cooling
+                    recommendation = "expect_cooling"
+                    self.logger.info(
+                        f"Leading indicator {insight['station_id']} shows cooling at "
+                        f"{insight['rate_per_hour']:.1f}°F/hr, may affect {target_city_state}"
+                    )
+            elif insight["trend"] == "rising" and target_trend["trend"] != "rising":
+                if insight["rate_per_hour"] > 2.0:  # Significant warming
+                    recommendation = "expect_warming"
+                    self.logger.info(
+                        f"Leading indicator {insight['station_id']} shows warming at "
+                        f"{insight['rate_per_hour']:.1f}°F/hr, may affect {target_city_state}"
+                    )
+
+        return {
+            "has_leading_indicators": True,
+            "leading_stations": leading_station_ids,
+            "insights": insights,
+            "target_trend": target_trend,
+            "recommendation": recommendation
+        }
 
     def get_forecast_stats_for_city_and_date(
         self,

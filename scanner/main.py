@@ -173,13 +173,37 @@ class KalshiWeatherScanner:
                     f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
                 )
 
+                # Check for leading indicator insights (e.g., Cheyenne → Denver)
+                leading_indicator_insights = None
+                if location_info and "station_id" in location_info:
+                    try:
+                        leading_indicator_insights = self.nws.get_leading_indicator_insights(
+                            target_station_id=station_id,
+                            target_city_state=parsed.location
+                        )
+
+                        if leading_indicator_insights and leading_indicator_insights.get("has_leading_indicators"):
+                            recommendation = leading_indicator_insights.get("recommendation")
+                            if recommendation != "no_change":
+                                insights = leading_indicator_insights.get("insights", [])
+                                if insights:
+                                    primary = insights[0]
+                                    self.logger.info(
+                                        f"  🌡️ Leading indicator {primary['station_id']}: "
+                                        f"{primary['trend']} at {primary['rate_per_hour']:+.1f}°F/hr "
+                                        f"→ {recommendation.replace('_', ' ')}"
+                                    )
+                    except Exception as e:
+                        self.logger.warning(f"  ⚠ Could not fetch leading indicators: {e}")
+
                 # Detect mispricing
                 opp = self.detector.analyze_temperature_market(
                     market,
                     parsed,
                     forecast,
                     current_conditions=current_conditions,
-                    observations=observations
+                    observations=observations,
+                    leading_indicator_insights=leading_indicator_insights
                 )
 
                 if opp:
