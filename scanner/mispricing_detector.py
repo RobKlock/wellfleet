@@ -393,13 +393,94 @@ class MispricingDetector:
         else:
             self.boundary_model = None
 
+    def _apply_leading_indicator_adjustment(
+        self,
+        base_forecast_value: float,
+        parsed: ParsedMarket,
+        leading_indicator_insights: Optional[Dict]
+    ) -> float:
+        """
+        Adjust forecast value based on leading indicator station trends
+
+        For example, if Cheyenne shows a strong cooling trend, we expect Denver's
+        minimum to drop lower than the base forecast suggests.
+
+        Args:
+            base_forecast_value: Base NWS forecast value (min/max/avg in °F)
+            parsed: Parsed market information
+            leading_indicator_insights: Leading indicator data from NWS adapter
+
+        Returns:
+            Adjusted forecast value in °F
+        """
+        if not leading_indicator_insights or not leading_indicator_insights.get("has_leading_indicators"):
+            return base_forecast_value
+
+        recommendation = leading_indicator_insights.get("recommendation")
+        if recommendation == "no_change":
+            return base_forecast_value
+
+        # Get the magnitude of the trend from the leading indicator
+        insights = leading_indicator_insights.get("insights", [])
+        if not insights:
+            return base_forecast_value
+
+        # Use the first (primary) leading indicator's rate
+        primary_insight = insights[0]
+        rate_per_hour = primary_insight.get("rate_per_hour", 0)
+
+        # Estimate how much the temperature might change over next 3-6 hours
+        # (typical lag time between Cheyenne and Denver weather)
+        lag_hours = 4  # Conservative estimate
+        expected_change = rate_per_hour * lag_hours
+
+        # Apply adjustment based on metric type
+        adjusted_value = base_forecast_value
+
+        if parsed.metric == "minimum":
+            # Minimums can only go lower
+            if recommendation == "expect_cooling":
+                # Cheyenne is cooling rapidly, Denver minimum likely to drop more
+                adjusted_value = base_forecast_value + expected_change  # expected_change is negative
+                self.logger.info(
+                    f"Leading indicator shows cooling at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting minimum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+            elif recommendation == "expect_warming":
+                # Cheyenne is warming, Denver minimum less likely to drop as low
+                adjusted_value = base_forecast_value + (expected_change * 0.5)  # Partial adjustment
+                self.logger.info(
+                    f"Leading indicator shows warming at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting minimum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+
+        elif parsed.metric == "maximum":
+            # Maximums can only go higher
+            if recommendation == "expect_warming":
+                # Cheyenne is warming rapidly, Denver maximum likely to rise more
+                adjusted_value = base_forecast_value + expected_change  # expected_change is positive
+                self.logger.info(
+                    f"Leading indicator shows warming at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting maximum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+            elif recommendation == "expect_cooling":
+                # Cheyenne is cooling, Denver maximum less likely to rise as high
+                adjusted_value = base_forecast_value + (expected_change * 0.5)  # Partial adjustment
+                self.logger.info(
+                    f"Leading indicator shows cooling at {rate_per_hour:.1f}°F/hr → "
+                    f"Adjusting maximum forecast from {base_forecast_value:.1f}°F to {adjusted_value:.1f}°F"
+                )
+
+        return adjusted_value
+
     def analyze_temperature_market(
         self,
         market: Dict,
         parsed: ParsedMarket,
         forecast: Dict,
         current_conditions: Optional[Dict] = None,
-        observations: Optional[List[Dict]] = None
+        observations: Optional[List[Dict]] = None,
+        leading_indicator_insights: Optional[Dict] = None
     ) -> Optional[Opportunity]:
         """
         Analyze a temperature market for mispricing
@@ -410,6 +491,7 @@ class MispricingDetector:
             forecast: Temperature forecast statistics
             current_conditions: Current weather conditions (for boundary model)
             observations: Recent temperature observations (for boundary model)
+            leading_indicator_insights: Leading indicator data from upstream stations
 
         Returns:
             Opportunity object if significant mispricing found, None otherwise
@@ -434,6 +516,17 @@ class MispricingDetector:
                 f"for {market['ticker']}"
             )
             return None
+
+        # Apply leading indicator adjustment if available
+        # This adjusts the forecast based on upstream weather patterns (e.g., Cheyenne → Denver)
+        adjusted_forecast_value = self._apply_leading_indicator_adjustment(
+            base_forecast_value=forecast_value,
+            parsed=parsed,
+            leading_indicator_insights=leading_indicator_insights
+        )
+
+        # Use adjusted value for probability calculations
+        forecast_value = adjusted_forecast_value
 
         # CRITICAL: Check if observations from today already determine the outcome
         # For intraday markets, once we've observed a certain min/max, that constrains the answer
@@ -611,9 +704,10 @@ class MispricingDetector:
         """
         Check if observations from today already determine the market outcome
 
-        Key insight: Minimums can only go lower, maximums can only go higher
-        - If observed_min < threshold and market asks "min > threshold" → Definite NO
-        - If observed_max > threshold and market asks "max < threshold" → Definite NO
+        Key insights:
+        1. Minimums can only go lower, maximums can only go higher
+        2. Peak times: minimums occur 5-7am, maximums occur 2-4pm
+        3. Kalshi uses integer thresholds with rounding (21.2°F ≈ 21°F)
 
         Args:
             forecast: Forecast dict with min/max/avg and includes_observations flag
@@ -621,15 +715,35 @@ class MispricingDetector:
             forecast_metric_key: The metric key to use ("min", "max", or "avg")
 
         Returns:
-            Probability if constrained (0.05 for NO, 0.95 for YES), None if not constrained
+            Probability if constrained (0.05-0.95), None if not constrained
         """
         observed_value = forecast.get(forecast_metric_key)
         if observed_value is None:
             return None
 
+        # Get current time to check if past typical peak time
+        from datetime import datetime
+        import pytz
+
+        timezone_str = forecast.get("timezone", "America/Denver")
+        tz = pytz.timezone(timezone_str)
+        current_time = datetime.now(tz)
+        current_hour = current_time.hour
+
+        # Typical peak times for daily temperature extremes
+        MINIMUM_PEAK_END = 8    # 8am (minimums typically 5-7am)
+        MAXIMUM_PEAK_END = 17   # 5pm (maximums typically 2-4pm)
+
+        past_minimum_peak = current_hour >= MINIMUM_PEAK_END
+        past_maximum_peak = current_hour >= MAXIMUM_PEAK_END
+
         threshold = parsed.threshold
         threshold_high = parsed.threshold_high
         comparison = parsed.comparison
+
+        # Rounding tolerance: Kalshi uses integer temps, allow ±0.5°F for edge cases
+        # Example: 21.2°F should match "20-21°F" range (rounds to 21°F)
+        ROUNDING_TOLERANCE = 0.5
 
         # For MINIMUM temperature markets
         if parsed.metric == "minimum":
@@ -637,70 +751,97 @@ class MispricingDetector:
                 # Market asks: "Will minimum be >= threshold?"
                 # If observed_min < threshold, minimum is ALREADY below threshold
                 # Minimum can only go lower, so answer is definitely NO
-                if observed_value < threshold:
+                if observed_value < threshold - ROUNDING_TOLERANCE:
+                    confidence = 0.95 if past_minimum_peak else 0.90
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
-                        f"(minimum can only go lower) → Definite NO"
+                        f"(minimum can only go lower, past peak: {past_minimum_peak}) → "
+                        f"Definite NO ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.05  # Definite NO (5% for uncertainty)
+                    return 1 - confidence  # Definite NO
 
             elif comparison == "below":
                 # Market asks: "Will minimum be < threshold?"
                 # If observed_min < threshold, answer is ALREADY YES
-                if observed_value < threshold:
+                if observed_value < threshold - ROUNDING_TOLERANCE:
+                    confidence = 0.95 if past_minimum_peak else 0.90
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
-                        f"(already below) → Definite YES"
+                        f"(already below, past peak: {past_minimum_peak}) → "
+                        f"Definite YES ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.95  # Definite YES
+                    return confidence  # Definite YES
 
             elif comparison == "between":
                 # Market asks: "Will minimum be between threshold and threshold_high?"
-                # If observed_min < threshold, minimum is ALREADY too low
-                if observed_value < threshold:
+                # With rounding tolerance: check if clearly outside range
+                if observed_value < threshold - ROUNDING_TOLERANCE:
+                    # Clearly below range
+                    confidence = 0.95 if past_minimum_peak else 0.90
                     self.logger.info(
                         f"Observed minimum {observed_value:.1f}°F < {threshold}°F "
-                        f"(already below range) → Definite NO"
+                        f"(already below range, past peak: {past_minimum_peak}) → "
+                        f"Definite NO ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.05  # Definite NO
-                # If observed_min > threshold_high, minimum is ALREADY too high
-                # (but minimum can still drop into range)
-                # So we DON'T constrain this case
+                    return 1 - confidence  # Definite NO
+
+                elif threshold_high and threshold - ROUNDING_TOLERANCE <= observed_value <= threshold_high + ROUNDING_TOLERANCE:
+                    # Within range (with rounding tolerance), and past peak time
+                    if past_minimum_peak:
+                        self.logger.info(
+                            f"Observed minimum {observed_value:.1f}°F in range [{threshold}°F, {threshold_high}°F] "
+                            f"and past peak time ({current_hour:02d}:00) → Definite YES"
+                        )
+                        return 0.95  # Definite YES - minimum is locked in within range
 
         # For MAXIMUM temperature markets
         elif parsed.metric == "maximum":
             if comparison in ["above", "at least"]:
                 # Market asks: "Will maximum be >= threshold?"
                 # If observed_max >= threshold, answer is ALREADY YES
-                if observed_value >= threshold:
+                if observed_value >= threshold + ROUNDING_TOLERANCE:
+                    confidence = 0.95 if past_maximum_peak else 0.90
                     self.logger.info(
                         f"Observed maximum {observed_value:.1f}°F >= {threshold}°F "
-                        f"(already above) → Definite YES"
+                        f"(already above, past peak: {past_maximum_peak}) → "
+                        f"Definite YES ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.95  # Definite YES
+                    return confidence  # Definite YES
 
             elif comparison == "below":
                 # Market asks: "Will maximum be < threshold?"
                 # If observed_max >= threshold, maximum is ALREADY at/above threshold
                 # Maximum can only go higher, so answer is definitely NO
-                if observed_value >= threshold:
+                if observed_value >= threshold + ROUNDING_TOLERANCE:
+                    confidence = 0.95 if past_maximum_peak else 0.90
                     self.logger.info(
                         f"Observed maximum {observed_value:.1f}°F >= {threshold}°F "
-                        f"(maximum can only go higher) → Definite NO"
+                        f"(maximum can only go higher, past peak: {past_maximum_peak}) → "
+                        f"Definite NO ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.05  # Definite NO
+                    return 1 - confidence  # Definite NO
 
             elif comparison == "between":
                 # Market asks: "Will maximum be between threshold and threshold_high?"
-                # If observed_max > threshold_high, maximum is ALREADY too high
-                if threshold_high and observed_value > threshold_high:
+                # With rounding tolerance: check if clearly outside range
+                if threshold_high and observed_value > threshold_high + ROUNDING_TOLERANCE:
+                    # Clearly above range
+                    confidence = 0.95 if past_maximum_peak else 0.90
                     self.logger.info(
                         f"Observed maximum {observed_value:.1f}°F > {threshold_high}°F "
-                        f"(already above range) → Definite NO"
+                        f"(already above range, past peak: {past_maximum_peak}) → "
+                        f"Definite NO ({(1-confidence)*100:.0f}% uncertainty)"
                     )
-                    return 0.05  # Definite NO
-                # If observed_max < threshold, maximum might still rise into range
-                # So we DON'T constrain this case
+                    return 1 - confidence  # Definite NO
+
+                elif threshold_high and threshold - ROUNDING_TOLERANCE <= observed_value <= threshold_high + ROUNDING_TOLERANCE:
+                    # Within range (with rounding tolerance), and past peak time
+                    if past_maximum_peak:
+                        self.logger.info(
+                            f"Observed maximum {observed_value:.1f}°F in range [{threshold}°F, {threshold_high}°F] "
+                            f"and past peak time ({current_hour:02d}:00) → Definite YES"
+                        )
+                        return 0.95  # Definite YES - maximum is locked in within range
 
         # No constraints apply - observations don't definitively answer the question
         return None
