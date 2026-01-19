@@ -283,14 +283,16 @@ class MarketParser:
                 comparison = "between"
                 threshold = threshold_low
             elif comparison_symbol == ">":
-                # Greater than: ">20"
-                comparison = "above"
-                threshold = threshold_low
+                # Greater than: ">20" (strictly greater, means ≥21 for integers)
+                # Normalize to "at least" form by adding 1
+                comparison = "at least"
+                threshold = threshold_low + 1
                 threshold_high = None
             elif comparison_symbol == "<":
-                # Less than: "<13"
-                comparison = "below"
-                threshold = threshold_low
+                # Less than: "<13" (strictly less, means ≤12 for integers)
+                # Normalize to "at most" form by subtracting 1
+                comparison = "at most"
+                threshold = threshold_low - 1
                 threshold_high = None
             else:
                 # No symbol - unclear, skip

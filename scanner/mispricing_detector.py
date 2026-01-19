@@ -119,8 +119,8 @@ class BoundaryForecastModel:
         if comparison in ["above", "at least"]:
             # P(temp >= threshold)
             prob = 1 - norm.cdf(threshold, loc=adjusted_forecast, scale=uncertainty)
-        elif comparison == "below":
-            # P(temp < threshold)
+        elif comparison in ["below", "at most"]:
+            # P(temp <= threshold)
             prob = norm.cdf(threshold, loc=adjusted_forecast, scale=uncertainty)
         elif comparison == "between":
             # P(threshold <= temp <= threshold_high)
@@ -313,7 +313,7 @@ class BoundaryForecastModel:
             else:
                 return 0.05
 
-        elif comparison == "below":
+        elif comparison in ["below", "at most"]:
             distance = threshold - forecast_value
 
             if distance > 5:
@@ -760,7 +760,7 @@ class MispricingDetector:
                     )
                     return 1 - confidence  # Definite NO
 
-            elif comparison == "below":
+            elif comparison in ["below", "at most"]:
                 # Market asks: "Will minimum be < threshold?"
                 # If observed_min < threshold, answer is ALREADY YES
                 if observed_value < threshold - ROUNDING_TOLERANCE:
@@ -808,7 +808,7 @@ class MispricingDetector:
                     )
                     return confidence  # Definite YES
 
-            elif comparison == "below":
+            elif comparison in ["below", "at most"]:
                 # Market asks: "Will maximum be < threshold?"
                 # If observed_max >= threshold, maximum is ALREADY at/above threshold
                 # Maximum can only go higher, so answer is definitely NO
@@ -867,7 +867,7 @@ class MispricingDetector:
         Returns:
             True if within boundary distance, False otherwise
         """
-        if comparison in ["above", "at least", "below"]:
+        if comparison in ["above", "at least", "below", "at most"]:
             # Check distance to single threshold
             distance = abs(forecast_value - threshold)
             return distance <= boundary_distance
@@ -919,8 +919,8 @@ class MispricingDetector:
             else:
                 return 0.05  # Very unlikely
 
-        elif comparison == "below":
-            # Question: Will temp be < threshold?
+        elif comparison in ["below", "at most"]:
+            # Question: Will temp be <= threshold? (inclusive)
             distance = threshold - forecast_value
 
             if distance > 5:
