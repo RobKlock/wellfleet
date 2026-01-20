@@ -75,7 +75,7 @@ signature = private_key.sign(
     message.encode('utf-8'),
     padding.PSS(
         mgf=padding.MGF1(hashes.SHA256()),
-        salt_length=padding.PSS.MAX_LENGTH
+        salt_length=padding.PSS.DIGEST_LENGTH
     ),
     hashes.SHA256()
 )
