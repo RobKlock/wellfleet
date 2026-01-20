@@ -79,7 +79,13 @@ class KalshiClient:
         except Exception as e:
             raise AuthenticationError(f"Failed to load private key: {e}")
 
-    def _sign_request(self, timestamp: str, method: str, path: str) -> str:
+    def _sign_request(
+        self,
+        timestamp: str,
+        method: str,
+        path: str,
+        json_body: Optional[Dict] = None
+    ) -> str:
         """
         Create RSA-PSS signature for API key authentication
 
@@ -87,12 +93,18 @@ class KalshiClient:
             timestamp: Request timestamp in milliseconds
             method: HTTP method (GET, POST, etc.)
             path: Request path without query parameters
+            json_body: Optional JSON body for POST/PUT requests
 
         Returns:
             Base64-encoded signature
         """
-        # Create message: timestamp + method + path
+        # Create message: timestamp + method + path (+ body for POST/PUT)
         message = f"{timestamp}{method}{path}"
+
+        # Add JSON body if present
+        if json_body:
+            import json as json_module
+            message += json_module.dumps(json_body, separators=(',', ':'))
 
         # Sign with RSA-PSS
         signature = self.private_key.sign(
@@ -155,6 +167,7 @@ class KalshiClient:
         method: str,
         endpoint: str,
         params: Optional[Dict] = None,
+        json: Optional[Dict] = None,
         max_retries: int = 3
     ) -> Dict:
         """
@@ -164,6 +177,7 @@ class KalshiClient:
             method: HTTP method (GET, POST, etc.)
             endpoint: API endpoint (without base URL)
             params: Query parameters
+            json: JSON payload for POST/PUT requests
             max_retries: Maximum number of retry attempts
 
         Returns:
@@ -179,7 +193,14 @@ class KalshiClient:
                 if self.auth_method == "api_key":
                     # Add API key signature headers
                     timestamp = str(int(time.time() * 1000))
-                    signature = self._sign_request(timestamp, method.upper(), endpoint)
+
+                    # For signature, need to include JSON body if present
+                    signature = self._sign_request(
+                        timestamp,
+                        method.upper(),
+                        endpoint,
+                        json_body=json
+                    )
 
                     headers.update({
                         "KALSHI-ACCESS-KEY": self.api_key_id,
@@ -191,6 +212,7 @@ class KalshiClient:
                     method=method,
                     url=url,
                     params=params,
+                    json=json,
                     headers=headers,
                     timeout=30
                 )
