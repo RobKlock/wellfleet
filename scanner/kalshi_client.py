@@ -205,6 +205,7 @@ class KalshiClient:
                     )
 
                     headers.update({
+                        "Content-Type": "application/json",
                         "KALSHI-ACCESS-KEY": self.api_key_id,
                         "KALSHI-ACCESS-TIMESTAMP": timestamp,
                         "KALSHI-ACCESS-SIGNATURE": signature
