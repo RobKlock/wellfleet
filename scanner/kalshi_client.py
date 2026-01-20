@@ -92,19 +92,21 @@ class KalshiClient:
         Args:
             timestamp: Request timestamp in milliseconds
             method: HTTP method (GET, POST, etc.)
-            path: Request path without query parameters
-            json_body: Optional JSON body for POST/PUT requests
+            path: Request path (may include query parameters)
+            json_body: Not used in signature (kept for API compatibility)
 
         Returns:
             Base64-encoded signature
-        """
-        # Create message: timestamp + method + path (+ body for POST/PUT)
-        message = f"{timestamp}{method}{path}"
 
-        # Add JSON body if present
-        if json_body:
-            import json as json_module
-            message += json_module.dumps(json_body, separators=(',', ':'))
+        Note: Per Kalshi's official API implementation, the signature is ONLY
+              based on timestamp + method + path (without query params).
+              JSON body is NOT included in the signature.
+        """
+        # Remove query parameters from path before signing (per Kalshi spec)
+        path_without_query = path.split('?')[0]
+
+        # Create message: timestamp + method + path (NO JSON body)
+        message = f"{timestamp}{method}{path_without_query}"
 
         # Sign with RSA-PSS
         signature = self.private_key.sign(

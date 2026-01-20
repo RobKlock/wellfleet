@@ -48,22 +48,23 @@ print("=" * 80)
 # Example: GET /portfolio/balance
 method = "GET"
 path = "/portfolio/balance"
-json_body = None  # No body for GET requests
 
-# Message format: timestamp + method + path (+ json_body if POST/PUT)
-message = f"{timestamp}{method}{path}"
+# Remove query parameters from path (per Kalshi API spec)
+path_without_query = path.split('?')[0]
 
-if json_body:
-    # For POST/PUT, add JSON body (compact, no spaces)
-    message += json.dumps(json_body, separators=(',', ':'))
+# Message format: timestamp + method + path
+# NOTE: JSON body is NOT included in signature (even for POST/PUT)
+message = f"{timestamp}{method}{path_without_query}"
 
 print(f"Message: '{message}'")
 print(f"\nBreakdown:")
 print(f"  - Timestamp: {timestamp}")
 print(f"  - Method: {method}")
-print(f"  - Path: {path}")
-if json_body:
-    print(f"  - JSON Body: {json.dumps(json_body, separators=(',', ':'))}")
+print(f"  - Path: {path_without_query}")
+print()
+print("IMPORTANT: Per Kalshi's official API implementation:")
+print("  - Query parameters are stripped from path before signing")
+print("  - JSON body is NOT included in signature (even for POST/PUT)")
 print()
 
 # 4. SIGN THE MESSAGE
