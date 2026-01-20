@@ -355,3 +355,126 @@ class KalshiClient:
         self.logger.info(f"Found {len(markets)} markets in series {series_ticker}")
 
         return markets
+
+    def get_balance(self) -> Dict:
+        """
+        Get account balance
+
+        Returns:
+            Dictionary with balance information
+        """
+        endpoint = "/portfolio/balance"
+        data = self._make_request("GET", endpoint)
+
+        return data.get("balance", {})
+
+    def place_order(
+        self,
+        ticker: str,
+        side: str,
+        action: str = "buy",
+        count: int = 1,
+        order_type: str = "market",
+        yes_price: Optional[int] = None,
+        no_price: Optional[int] = None
+    ) -> Dict:
+        """
+        Place an order on Kalshi
+
+        Args:
+            ticker: Market ticker (e.g., "KXLOWTDEN-26JAN19-B18.5")
+            side: "yes" or "no"
+            action: "buy" or "sell" (default: "buy")
+            count: Number of contracts (default: 1)
+            order_type: "market" or "limit" (default: "market")
+            yes_price: Limit price for YES side in cents (0-100), required if order_type="limit"
+            no_price: Limit price for NO side in cents (0-100), required if order_type="limit"
+
+        Returns:
+            Order confirmation dictionary
+
+        Note: Kalshi uses CENTS not dollars
+        - To buy YES at 20% ($0.20), set yes_price=20
+        - To buy NO at 80% ($0.80), set no_price=80
+        """
+        endpoint = "/portfolio/orders"
+
+        payload = {
+            "ticker": ticker,
+            "action": action,
+            "side": side.lower(),
+            "count": count,
+            "type": order_type
+        }
+
+        # Add limit prices if specified
+        if order_type == "limit":
+            if side.lower() == "yes" and yes_price is not None:
+                payload["yes_price"] = yes_price
+            elif side.lower() == "no" and no_price is not None:
+                payload["no_price"] = no_price
+            else:
+                raise ValueError(f"Limit order requires price: yes_price for YES, no_price for NO")
+
+        self.logger.info(
+            f"Placing {action} order: {count}x {ticker} {side.upper()} "
+            f"@ {order_type}"
+        )
+
+        data = self._make_request("POST", endpoint, json=payload)
+
+        order = data.get("order", {})
+        self.logger.info(f"Order placed: {order.get('order_id', 'unknown')}")
+
+        return order
+
+    def get_orders(self, ticker: Optional[str] = None, status: str = "resting") -> List[Dict]:
+        """
+        Get current orders
+
+        Args:
+            ticker: Filter by ticker (optional)
+            status: Filter by status: "resting", "canceled", "executed" (default: "resting")
+
+        Returns:
+            List of order dictionaries
+        """
+        endpoint = "/portfolio/orders"
+        params = {"status": status}
+
+        if ticker:
+            params["ticker"] = ticker
+
+        data = self._make_request("GET", endpoint, params=params)
+
+        return data.get("orders", [])
+
+    def cancel_order(self, order_id: str) -> Dict:
+        """
+        Cancel an order
+
+        Args:
+            order_id: Order ID to cancel
+
+        Returns:
+            Cancellation confirmation
+        """
+        endpoint = f"/portfolio/orders/{order_id}"
+
+        self.logger.info(f"Canceling order: {order_id}")
+
+        data = self._make_request("DELETE", endpoint)
+
+        return data
+
+    def get_portfolio(self) -> Dict:
+        """
+        Get current portfolio positions
+
+        Returns:
+            Dictionary with portfolio information
+        """
+        endpoint = "/portfolio"
+        data = self._make_request("GET", endpoint)
+
+        return data.get("portfolio", {})
