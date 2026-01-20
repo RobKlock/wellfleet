@@ -211,14 +211,26 @@ class KalshiClient:
                         "KALSHI-ACCESS-SIGNATURE": signature
                     })
 
-                response = self.session.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    json=json,
-                    headers=headers,
-                    timeout=30
-                )
+                # Use requests directly for API key auth to avoid session header conflicts
+                if self.auth_method == "api_key":
+                    response = requests.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json,
+                        headers=headers,
+                        timeout=30
+                    )
+                else:
+                    # Use session for email/password auth (needs Bearer token)
+                    response = self.session.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json,
+                        headers=headers,
+                        timeout=30
+                    )
 
                 # Handle rate limiting
                 if response.status_code == 429:
