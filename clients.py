@@ -117,6 +117,13 @@ class KalshiHttpClient(KalshiBaseClient):
     def raise_if_bad_response(self, response: requests.Response) -> None:
         """Raises an HTTPError if the response status code indicates an error."""
         if response.status_code not in range(200, 299):
+            # Print error details before raising
+            print(f"\n❌ API Error {response.status_code}:")
+            try:
+                error_data = response.json()
+                print(f"Error: {error_data}")
+            except:
+                print(f"Response text: {response.text}")
             response.raise_for_status()
 
     def post(self, path: str, body: dict) -> Any:
