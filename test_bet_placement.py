@@ -116,15 +116,32 @@ if response.strip().upper() != "YES":
 
 # Place order
 print(f"\n[6] Placing order...")
+
+# For market orders, we need to provide a price limit
+# Convert price to cents (0-100) and add buffer to ensure fill
+price_cents = int(price * 100)
+# Add 5% buffer to ensure market order fills
+limit_price = min(99, price_cents + 5)
+
+order_body = {
+    'ticker': ticker,
+    'action': 'buy',
+    'side': side,
+    'count': count,
+    'type': 'limit'
+}
+
+# Add the appropriate price field based on side
+if side == 'yes':
+    order_body['yes_price'] = limit_price
+else:
+    order_body['no_price'] = limit_price
+
+print(f"   Limit price: {limit_price}¢")
+
 order_response = client.post(
     '/trade-api/v2/portfolio/orders',
-    body={
-        'ticker': ticker,
-        'action': 'buy',
-        'side': side,
-        'count': count,
-        'type': 'market'
-    }
+    body=order_body
 )
 
 order = order_response.get('order', {})
