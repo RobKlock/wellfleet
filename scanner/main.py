@@ -132,10 +132,12 @@ class KalshiWeatherScanner:
                 # Get current conditions and observations FIRST (needed for today's actual temps)
                 current_conditions = None
                 observations = None
+                preliminary_report = None
 
                 location_info = self.nws.LOCATIONS.get(parsed.location)
                 if location_info and "station_id" in location_info:
                     station_id = location_info["station_id"]
+                    timezone = location_info["timezone"]
 
                     try:
                         # Fetch current conditions
@@ -155,15 +157,34 @@ class KalshiWeatherScanner:
                     except Exception as e:
                         self.logger.warning(f"  ⚠ Could not fetch current conditions: {e}")
 
+                    # Fetch preliminary CLI report for today's markets
+                    # This is more reliable than individual observations due to quality control
+                    if parsed.date.isoformat() == datetime.now(pytz.timezone(timezone)).date().isoformat():
+                        try:
+                            preliminary_report = self.nws.get_preliminary_climate_report(
+                                station_id=station_id,
+                                date_str=parsed.date.isoformat()
+                            )
+                            if preliminary_report:
+                                self.logger.info(
+                                    f"  ✓ Preliminary CLI: "
+                                    f"MIN={preliminary_report.get('preliminary_min', 'N/A')}°F, "
+                                    f"MAX={preliminary_report.get('preliminary_max', 'N/A')}°F"
+                                )
+                        except Exception as e:
+                            self.logger.warning(f"  ⚠ Could not fetch preliminary CLI: {e}")
+
                 # Extract stats for target date with meteorological data
                 # Pass observations so we include actual temps from earlier today (if target_date is today)
+                # Also pass preliminary CLI report if available (more reliable than observations)
                 timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
                 forecast = self.nws.extract_temperature_stats_for_date(
                     forecast_periods,
                     parsed.date.isoformat(),
                     timezone,
                     include_meteorology=True,  # Include sky cover, wind, dewpoint
-                    observations=observations   # Include actual observations for today
+                    observations=observations,  # Include actual observations for today
+                    preliminary_report=preliminary_report  # Include preliminary CLI report
                 )
 
                 if not forecast:

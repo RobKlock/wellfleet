@@ -273,7 +273,8 @@ class NWSAdapter:
         target_date: str,
         timezone: str,
         include_meteorology: bool = False,
-        observations: Optional[List[Dict]] = None
+        observations: Optional[List[Dict]] = None,
+        preliminary_report: Optional[Dict] = None
     ) -> Optional[Dict]:
         """
         Calculate min/max/avg temperature for a specific date
@@ -287,6 +288,7 @@ class NWSAdapter:
             timezone: IANA timezone string (e.g., "America/Denver")
             include_meteorology: If True, include sky cover, wind, and dewpoint data
             observations: Optional list of recent observations to merge with forecast
+            preliminary_report: Optional preliminary CLI report with min/max temps
 
         Returns:
             Dictionary with temperature statistics or None if no data available
@@ -392,6 +394,18 @@ class NWSAdapter:
                 "num_periods": len(temps_for_date),
                 "includes_observations": used_observations  # Flag if actual temps from today were used
             }
+
+            # Add preliminary CLI report data if available (more reliable than observations)
+            if preliminary_report:
+                if "preliminary_min" in preliminary_report:
+                    stats["preliminary_min"] = preliminary_report["preliminary_min"]
+                if "preliminary_max" in preliminary_report:
+                    stats["preliminary_max"] = preliminary_report["preliminary_max"]
+                self.logger.info(
+                    f"Added preliminary CLI data: "
+                    f"MIN={preliminary_report.get('preliminary_min', 'N/A')}°F, "
+                    f"MAX={preliminary_report.get('preliminary_max', 'N/A')}°F"
+                )
 
             if include_meteorology:
                 stats["sky_covers"] = sky_covers
