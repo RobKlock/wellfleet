@@ -635,25 +635,12 @@ class NWSAdapter:
         Note: ASOS uses 5-minute running averages, not instantaneous readings.
         Display values are rounded but internal precision is higher.
         """
-        # Map station IDs to NWS site codes
-        # KDEN -> BOU (Boulder NWS office)
-        # KMIA -> MFL (Miami NWS office)
-        site_map = {
-            "KDEN": "BOU",
-            "KMIA": "MFL",
-            "KCYS": "CYS"
-        }
-
-        site = site_map.get(station_id)
-        if not site:
-            self.logger.warning(f"No NWS site mapping for station {station_id}")
-            return None
-
-        # Format: https://forecast.weather.gov/product.php?site=BOU&product=CLI&issuedby=DEN
-        station_code = station_id[1:]  # Remove 'K' prefix
-        url = f"{self.base_url.replace('api.', '')}/product.php"
+        # Format: https://forecast.weather.gov/product.php?site=NWS&product=CLI&issuedby=DEN
+        # Use site=NWS (generic) for CLI products, not the WFO code
+        station_code = station_id[1:]  # Remove 'K' prefix (KDEN -> DEN)
+        url = f"{self.base_url.replace('api.', 'forecast.')}/product.php"
         params = {
-            "site": site,
+            "site": "NWS",  # Use generic NWS site for CLI products
             "product": "CLI",
             "issuedby": station_code
         }
@@ -663,12 +650,21 @@ class NWSAdapter:
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
 
-            # Parse the text report
-            text = response.text
+            # Parse the HTML response - CLI text is in a <pre> tag
+            html = response.text
+            import re
+
+            # Extract text from <pre> tag
+            pre_match = re.search(r'<pre[^>]*>(.*?)</pre>', html, re.DOTALL)
+            if not pre_match:
+                self.logger.warning("Could not find CLI text in <pre> tag")
+                return None
+
+            text = pre_match.group(1)
 
             # Look for temperature section
-            # Example: "  MINIMUM         20    535 AM -20    1883  19      1      -11"
-            import re
+            # Example: "  MINIMUM         13    138 AM -14    1962  19     -6       16"
+            # Pattern: MINIMUM <temp> <time> AM/PM
             min_pattern = r"MINIMUM\s+(\d+)\s+(\d+)\s+(AM|PM)"
             max_pattern = r"MAXIMUM\s+(\d+)\s+(\d+)\s+(AM|PM)"
 
@@ -679,14 +675,30 @@ class NWSAdapter:
 
             if min_match:
                 result["preliminary_min"] = float(min_match.group(1))
-                result["min_time"] = f"{min_match.group(2)} {min_match.group(3)}"
+                # Format time (e.g., "138" -> "1:38")
+                time_raw = min_match.group(2)
+                if len(time_raw) == 3:
+                    time_formatted = f"{time_raw[0]}:{time_raw[1:]}"
+                elif len(time_raw) == 4:
+                    time_formatted = f"{time_raw[:2]}:{time_raw[2:]}"
+                else:
+                    time_formatted = time_raw
+                result["min_time"] = f"{time_formatted} {min_match.group(3)}"
                 self.logger.info(
                     f"Preliminary CLI: MIN={result['preliminary_min']}°F at {result['min_time']}"
                 )
 
             if max_match:
                 result["preliminary_max"] = float(max_match.group(1))
-                result["max_time"] = f"{max_match.group(2)} {max_match.group(3)}"
+                # Format time (e.g., "240" -> "2:40")
+                time_raw = max_match.group(2)
+                if len(time_raw) == 3:
+                    time_formatted = f"{time_raw[0]}:{time_raw[1:]}"
+                elif len(time_raw) == 4:
+                    time_formatted = f"{time_raw[:2]}:{time_raw[2:]}"
+                else:
+                    time_formatted = time_raw
+                result["max_time"] = f"{time_formatted} {max_match.group(3)}"
                 self.logger.info(
                     f"Preliminary CLI: MAX={result['preliminary_max']}°F at {result['max_time']}"
                 )
