@@ -719,7 +719,19 @@ class MispricingDetector:
         Returns:
             Probability if constrained (0.05-0.95), None if not constrained
         """
-        observed_value = forecast.get(forecast_metric_key)
+        # Prioritize preliminary CLI report data over observation-based min/max
+        # CLI reports are more reliable due to quality control and proper averaging
+        observed_value = None
+        if parsed.metric == "minimum" and "preliminary_min" in forecast:
+            observed_value = forecast["preliminary_min"]
+            self.logger.info(f"Using preliminary CLI minimum: {observed_value}°F")
+        elif parsed.metric == "maximum" and "preliminary_max" in forecast:
+            observed_value = forecast["preliminary_max"]
+            self.logger.info(f"Using preliminary CLI maximum: {observed_value}°F")
+        else:
+            # Fall back to observation-based min/max
+            observed_value = forecast.get(forecast_metric_key)
+
         if observed_value is None:
             return None
 
