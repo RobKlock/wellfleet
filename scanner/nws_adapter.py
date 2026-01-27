@@ -8,26 +8,14 @@ import logging
 import pytz
 from datetime import datetime
 from typing import List, Dict, Optional
+from .city_config import CITY_DATABASE, normalize_city_name, get_city_config
 
 
 class NWSAdapter:
     """Adapter for retrieving weather forecast data from National Weather Service API"""
 
-    # Supported locations with their coordinates and timezones
-    LOCATIONS = {
-        "Denver, CO": {
-            "lat": 39.7392,
-            "lon": -104.9903,
-            "timezone": "America/Denver",
-            "station_id": "KDEN"
-        },
-        "Miami, FL": {
-            "lat": 25.7617,
-            "lon": -80.1918,
-            "timezone": "America/New_York",
-            "station_id": "KMIA"
-        }
-    }
+    # Use dynamic city database instead of hardcoded locations
+    LOCATIONS = CITY_DATABASE
 
     def __init__(self, user_agent: str = "KalshiWeatherScanner/1.0"):
         """
@@ -139,10 +127,15 @@ class NWSAdapter:
         """
         key = f"{city}, {state}"
 
-        if key not in self.LOCATIONS:
-            raise ValueError(f"Unsupported location: {key}. Supported: {list(self.LOCATIONS.keys())}")
+        # Try to normalize the city name to handle variations
+        normalized_key = normalize_city_name(key)
+        if not normalized_key:
+            normalized_key = key
 
-        location = self.LOCATIONS[key]
+        if normalized_key not in self.LOCATIONS:
+            raise ValueError(f"Unsupported location: {key}. Supported cities: {len(self.LOCATIONS)} available")
+
+        location = self.LOCATIONS[normalized_key]
         return self.get_hourly_forecast(location["lat"], location["lon"])
 
     def extract_temperature_stats_for_date(
@@ -228,14 +221,20 @@ class NWSAdapter:
             Dictionary with temperature statistics or None if unavailable
         """
         key = f"{city}, {state}"
-        if key not in self.LOCATIONS:
+
+        # Try to normalize the city name
+        normalized_key = normalize_city_name(key)
+        if not normalized_key:
+            normalized_key = key
+
+        if normalized_key not in self.LOCATIONS:
             raise ValueError(f"Unsupported location: {key}")
 
         # Get forecast periods
         periods = self.get_forecast_for_city(city, state)
 
         # Get timezone for this location
-        timezone = self.LOCATIONS[key]["timezone"]
+        timezone = self.LOCATIONS[normalized_key]["timezone"]
 
         # Extract stats for target date
         return self.extract_temperature_stats_for_date(periods, target_date, timezone)
