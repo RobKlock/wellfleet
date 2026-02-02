@@ -8,6 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime, date
+from .city_config import normalize_city_name, CITY_ABBREVIATIONS
 
 
 @dataclass
@@ -232,12 +233,13 @@ class MarketParser:
                 # If that fails, try next year (for dates that might have rolled over)
                 parsed_date = datetime.strptime(f"{date_str}, {current_year + 1}", "%B %d, %Y").date()
 
-            # Add state if just city name (Denver -> Denver, CO; Miami -> Miami, FL)
+            # Try to normalize city name if it's just a city without state
             if "," not in location:
-                if "denver" in location.lower():
-                    location = "Denver, CO"
-                elif "miami" in location.lower():
-                    location = "Miami, FL"
+                normalized = normalize_city_name(location)
+                if normalized:
+                    location = normalized
+                else:
+                    self.logger.warning(f"Could not normalize city name: {location}")
 
             return ParsedMarket(
                 ticker=ticker,
@@ -264,15 +266,21 @@ class MarketParser:
             # Parse date
             parsed_date = datetime.strptime(date_str, "%b %d, %Y").date()
 
-            # Infer location from ticker
+            # Infer location from ticker using abbreviation mapping
             # KXLOWTDEN → Denver, CO
             # KXLOWTMIA → Miami, FL
+            # KXLOWTPHX → Phoenix, AZ
+            # etc.
             location = None
-            if "DEN" in ticker.upper():
-                location = "Denver, CO"
-            elif "MIA" in ticker.upper():
-                location = "Miami, FL"
-            else:
+            ticker_upper = ticker.upper()
+
+            # Try to find a city abbreviation in the ticker
+            for abbrev, city_name in CITY_ABBREVIATIONS.items():
+                if abbrev in ticker_upper:
+                    location = city_name
+                    break
+
+            if not location:
                 self.logger.warning(f"Cannot infer location from ticker: {ticker}")
                 return ParsedMarket(ticker=ticker, is_parseable=False)
 

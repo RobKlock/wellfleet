@@ -338,32 +338,27 @@ class KalshiWeatherScanner:
 
     def _filter_weather_markets(self, markets: List[dict]) -> List[dict]:
         """
-        Filter for weather markets in supported locations
+        Filter for weather/temperature markets
 
         Args:
             markets: List of all markets
 
         Returns:
-            List of weather markets for Denver/Miami
+            List of weather/temperature markets (all locations)
         """
-        supported_locations = ["Denver", "Miami"]
-
         weather_markets = []
         for market in markets:
             title = market["title"].lower()
 
-            # Check if it's a temperature/weather market (broader search)
+            # Check if it's a temperature/weather market
             is_weather = any(keyword in title for keyword in [
                 "temperature", "weather", "lowest", "highest", "warmest", "coldest"
             ])
 
-            if not is_weather:
-                continue
-
-            # Check if it's for a supported location
-            if any(loc.lower() in title for loc in supported_locations):
+            if is_weather:
                 weather_markets.append(market)
 
+        self.logger.info(f"Found {len(weather_markets)} weather/temperature markets")
         return weather_markets
 
     def _parse_location(self, location: str) -> tuple:

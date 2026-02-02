@@ -32,7 +32,15 @@ class ReportGenerator:
         report = []
         report.append("# Kalshi Weather Arbitrage Report")
         report.append(f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        report.append("**Locations**: Denver, Miami")
+
+        # Dynamically list locations from opportunities
+        if opportunities:
+            unique_locations = sorted(set(opp.location for opp in opportunities if opp.location))
+            if unique_locations:
+                report.append(f"**Locations**: {', '.join(unique_locations)}")
+        else:
+            report.append("**Locations**: All available climate markets")
+
         report.append("")
 
         if not opportunities:

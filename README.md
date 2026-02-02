@@ -2,6 +2,8 @@
 
 A Python-based scanner that identifies mispriced weather markets on Kalshi by comparing market prices against authoritative NWS forecast data.
 
+**NEW**: Now supports **100+ US cities** with overnight scanning capabilities! See [CLIMATE_MARKETS_GUIDE.md](CLIMATE_MARKETS_GUIDE.md) for details.
+
 ## Core Thesis
 
 Kalshi liquidity promotion participants optimize for volume rebates rather than accuracy, creating systematic mispricings that can be exploited by checking actual NWS data.
@@ -33,12 +35,20 @@ cat reports/current.md
 ## How It Works
 
 1. **Fetches** markets with liquidity promotions from Kalshi API
-2. **Filters** for temperature markets in Denver and Miami
-3. **Retrieves** authoritative forecasts from National Weather Service
+2. **Filters** for temperature/weather markets (all US cities supported)
+3. **Retrieves** authoritative forecasts from National Weather Service (100+ cities)
 4. **Parses** market titles to extract thresholds and conditions
 5. **Calculates** true probabilities based on NWS forecasts
 6. **Detects** mispricings where market price differs significantly from forecast
 7. **Generates** detailed reports with recommended bet sizes (using Kelly criterion)
+
+## Features
+
+- **100+ US Cities**: Supports all major metropolitan areas, state capitals, and regional hubs
+- **Overnight Scanning**: Automated scanning during configured hours (e.g., 8pm-8am)
+- **Dynamic Location Discovery**: Automatically detects and handles any climate market location
+- **Comprehensive Coverage**: No longer limited to Denver/Miami - scans ALL climate markets
+- **Timing Optimization**: Takes advantage of overnight market inefficiencies
 
 ## Project Structure
 
