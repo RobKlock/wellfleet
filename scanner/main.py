@@ -129,12 +129,62 @@ class KalshiWeatherScanner:
 
                 forecast_periods = self.nws.get_forecast_for_city(city, state)
 
-                # Extract stats for target date
+                # Get current conditions and observations FIRST (needed for today's actual temps)
+                current_conditions = None
+                observations = None
+                preliminary_report = None
+
+                location_info = self.nws.LOCATIONS.get(parsed.location)
+                if location_info and "station_id" in location_info:
+                    station_id = location_info["station_id"]
+                    timezone = location_info["timezone"]
+
+                    try:
+                        # Fetch current conditions
+                        current_conditions = self.nws.get_current_conditions(station_id)
+
+                        # Fetch recent observations (last 200 = ~24-48 hours of hourly data)
+                        # Critical for today's markets - gives us actual temps from earlier today
+                        # Need enough observations to capture overnight lows/highs
+                        observations = self.nws.get_observations(station_id)
+
+                        if current_conditions:
+                            self.logger.info(
+                                f"  ✓ Current: {current_conditions['temperature']:.1f}°F, "
+                                f"wind={current_conditions['wind_speed']:.1f}mph, "
+                                f"sky={current_conditions['sky_cover']}%"
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"  ⚠ Could not fetch current conditions: {e}")
+
+                    # Fetch preliminary CLI report for today's markets
+                    # This is more reliable than individual observations due to quality control
+                    if parsed.date.isoformat() == datetime.now(pytz.timezone(timezone)).date().isoformat():
+                        try:
+                            preliminary_report = self.nws.get_preliminary_climate_report(
+                                station_id=station_id,
+                                date_str=parsed.date.isoformat()
+                            )
+                            if preliminary_report:
+                                self.logger.info(
+                                    f"  ✓ Preliminary CLI: "
+                                    f"MIN={preliminary_report.get('preliminary_min', 'N/A')}°F, "
+                                    f"MAX={preliminary_report.get('preliminary_max', 'N/A')}°F"
+                                )
+                        except Exception as e:
+                            self.logger.warning(f"  ⚠ Could not fetch preliminary CLI: {e}")
+
+                # Extract stats for target date with meteorological data
+                # Pass observations so we include actual temps from earlier today (if target_date is today)
+                # Also pass preliminary CLI report if available (more reliable than observations)
                 timezone = self.nws.LOCATIONS[parsed.location]["timezone"]
                 forecast = self.nws.extract_temperature_stats_for_date(
                     forecast_periods,
                     parsed.date.isoformat(),
-                    timezone
+                    timezone,
+                    include_meteorology=True,  # Include sky cover, wind, dewpoint
+                    observations=observations,  # Include actual observations for today
+                    preliminary_report=preliminary_report  # Include preliminary CLI report
                 )
 
                 if not forecast:
@@ -146,8 +196,38 @@ class KalshiWeatherScanner:
                     f"max={forecast['max']:.1f}°F, avg={forecast['avg']:.1f}°F"
                 )
 
+                # Check for leading indicator insights (e.g., Cheyenne → Denver)
+                leading_indicator_insights = None
+                if location_info and "station_id" in location_info:
+                    try:
+                        leading_indicator_insights = self.nws.get_leading_indicator_insights(
+                            target_station_id=station_id,
+                            target_city_state=parsed.location
+                        )
+
+                        if leading_indicator_insights and leading_indicator_insights.get("has_leading_indicators"):
+                            recommendation = leading_indicator_insights.get("recommendation")
+                            if recommendation != "no_change":
+                                insights = leading_indicator_insights.get("insights", [])
+                                if insights:
+                                    primary = insights[0]
+                                    self.logger.info(
+                                        f"  🌡️ Leading indicator {primary['station_id']}: "
+                                        f"{primary['trend']} at {primary['rate_per_hour']:+.1f}°F/hr "
+                                        f"→ {recommendation.replace('_', ' ')}"
+                                    )
+                    except Exception as e:
+                        self.logger.warning(f"  ⚠ Could not fetch leading indicators: {e}")
+
                 # Detect mispricing
-                opp = self.detector.analyze_temperature_market(market, parsed, forecast)
+                opp = self.detector.analyze_temperature_market(
+                    market,
+                    parsed,
+                    forecast,
+                    current_conditions=current_conditions,
+                    observations=observations,
+                    leading_indicator_insights=leading_indicator_insights
+                )
 
                 if opp:
                     opportunities.append(opp)

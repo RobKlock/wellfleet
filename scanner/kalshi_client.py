@@ -79,20 +79,34 @@ class KalshiClient:
         except Exception as e:
             raise AuthenticationError(f"Failed to load private key: {e}")
 
-    def _sign_request(self, timestamp: str, method: str, path: str) -> str:
+    def _sign_request(
+        self,
+        timestamp: str,
+        method: str,
+        path: str,
+        json_body: Optional[Dict] = None
+    ) -> str:
         """
         Create RSA-PSS signature for API key authentication
 
         Args:
             timestamp: Request timestamp in milliseconds
             method: HTTP method (GET, POST, etc.)
-            path: Request path without query parameters
+            path: Request path (may include query parameters)
+            json_body: Not used in signature (kept for API compatibility)
 
         Returns:
             Base64-encoded signature
+
+        Note: Per Kalshi's official API implementation, the signature is ONLY
+              based on timestamp + method + path (without query params).
+              JSON body is NOT included in the signature.
         """
-        # Create message: timestamp + method + path
-        message = f"{timestamp}{method}{path}"
+        # Remove query parameters from path before signing (per Kalshi spec)
+        path_without_query = path.split('?')[0]
+
+        # Create message: timestamp + method + path (NO JSON body)
+        message = f"{timestamp}{method}{path_without_query}"
 
         # Sign with RSA-PSS
         signature = self.private_key.sign(
@@ -155,6 +169,7 @@ class KalshiClient:
         method: str,
         endpoint: str,
         params: Optional[Dict] = None,
+        json: Optional[Dict] = None,
         max_retries: int = 3
     ) -> Dict:
         """
@@ -164,6 +179,7 @@ class KalshiClient:
             method: HTTP method (GET, POST, etc.)
             endpoint: API endpoint (without base URL)
             params: Query parameters
+            json: JSON payload for POST/PUT requests
             max_retries: Maximum number of retry attempts
 
         Returns:
@@ -179,21 +195,42 @@ class KalshiClient:
                 if self.auth_method == "api_key":
                     # Add API key signature headers
                     timestamp = str(int(time.time() * 1000))
-                    signature = self._sign_request(timestamp, method.upper(), endpoint)
+
+                    # For signature, need to include JSON body if present
+                    signature = self._sign_request(
+                        timestamp,
+                        method.upper(),
+                        endpoint,
+                        json_body=json
+                    )
 
                     headers.update({
+                        "Content-Type": "application/json",
                         "KALSHI-ACCESS-KEY": self.api_key_id,
                         "KALSHI-ACCESS-TIMESTAMP": timestamp,
                         "KALSHI-ACCESS-SIGNATURE": signature
                     })
 
-                response = self.session.request(
-                    method=method,
-                    url=url,
-                    params=params,
-                    headers=headers,
-                    timeout=30
-                )
+                # Use requests directly for API key auth to avoid session header conflicts
+                if self.auth_method == "api_key":
+                    response = requests.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json,
+                        headers=headers,
+                        timeout=30
+                    )
+                else:
+                    # Use session for email/password auth (needs Bearer token)
+                    response = self.session.request(
+                        method=method,
+                        url=url,
+                        params=params,
+                        json=json,
+                        headers=headers,
+                        timeout=30
+                    )
 
                 # Handle rate limiting
                 if response.status_code == 429:
@@ -355,3 +392,126 @@ class KalshiClient:
         self.logger.info(f"Found {len(markets)} markets in series {series_ticker}")
 
         return markets
+
+    def get_balance(self) -> Dict:
+        """
+        Get account balance
+
+        Returns:
+            Dictionary with balance information
+        """
+        endpoint = "/portfolio/balance"
+        data = self._make_request("GET", endpoint)
+
+        return data.get("balance", {})
+
+    def place_order(
+        self,
+        ticker: str,
+        side: str,
+        action: str = "buy",
+        count: int = 1,
+        order_type: str = "market",
+        yes_price: Optional[int] = None,
+        no_price: Optional[int] = None
+    ) -> Dict:
+        """
+        Place an order on Kalshi
+
+        Args:
+            ticker: Market ticker (e.g., "KXLOWTDEN-26JAN19-B18.5")
+            side: "yes" or "no"
+            action: "buy" or "sell" (default: "buy")
+            count: Number of contracts (default: 1)
+            order_type: "market" or "limit" (default: "market")
+            yes_price: Limit price for YES side in cents (0-100), required if order_type="limit"
+            no_price: Limit price for NO side in cents (0-100), required if order_type="limit"
+
+        Returns:
+            Order confirmation dictionary
+
+        Note: Kalshi uses CENTS not dollars
+        - To buy YES at 20% ($0.20), set yes_price=20
+        - To buy NO at 80% ($0.80), set no_price=80
+        """
+        endpoint = "/portfolio/orders"
+
+        payload = {
+            "ticker": ticker,
+            "action": action,
+            "side": side.lower(),
+            "count": count,
+            "type": order_type
+        }
+
+        # Add limit prices if specified
+        if order_type == "limit":
+            if side.lower() == "yes" and yes_price is not None:
+                payload["yes_price"] = yes_price
+            elif side.lower() == "no" and no_price is not None:
+                payload["no_price"] = no_price
+            else:
+                raise ValueError(f"Limit order requires price: yes_price for YES, no_price for NO")
+
+        self.logger.info(
+            f"Placing {action} order: {count}x {ticker} {side.upper()} "
+            f"@ {order_type}"
+        )
+
+        data = self._make_request("POST", endpoint, json=payload)
+
+        order = data.get("order", {})
+        self.logger.info(f"Order placed: {order.get('order_id', 'unknown')}")
+
+        return order
+
+    def get_orders(self, ticker: Optional[str] = None, status: str = "resting") -> List[Dict]:
+        """
+        Get current orders
+
+        Args:
+            ticker: Filter by ticker (optional)
+            status: Filter by status: "resting", "canceled", "executed" (default: "resting")
+
+        Returns:
+            List of order dictionaries
+        """
+        endpoint = "/portfolio/orders"
+        params = {"status": status}
+
+        if ticker:
+            params["ticker"] = ticker
+
+        data = self._make_request("GET", endpoint, params=params)
+
+        return data.get("orders", [])
+
+    def cancel_order(self, order_id: str) -> Dict:
+        """
+        Cancel an order
+
+        Args:
+            order_id: Order ID to cancel
+
+        Returns:
+            Cancellation confirmation
+        """
+        endpoint = f"/portfolio/orders/{order_id}"
+
+        self.logger.info(f"Canceling order: {order_id}")
+
+        data = self._make_request("DELETE", endpoint)
+
+        return data
+
+    def get_portfolio(self) -> Dict:
+        """
+        Get current portfolio positions
+
+        Returns:
+            Dictionary with portfolio information
+        """
+        endpoint = "/portfolio"
+        data = self._make_request("GET", endpoint)
+
+        return data.get("portfolio", {})
