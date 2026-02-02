@@ -78,7 +78,7 @@ def run_single_scan(scanner: KalshiWeatherScanner) -> int:
             logger.info(f"Starting scan (attempt {attempt}/{MAX_RETRIES})...")
 
             # Scan all promo markets (now includes all climate markets)
-            opportunities = scanner.scan(mode="promo")
+            opportunities = scanner.scan()
 
             logger.info(f"Scan completed: {len(opportunities)} opportunities found")
             return len(opportunities)
@@ -110,7 +110,7 @@ def save_timestamped_report(scanner: KalshiWeatherScanner, opportunities: list) 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     report_path = REPORTS_DIR / f"scan_report_{timestamp}.md"
 
-    report = scanner.report_generator.generate_daily_report(opportunities)
+    report = scanner.reporter.generate_daily_report(opportunities)
 
     with open(report_path, 'w') as f:
         f.write(report)
@@ -149,14 +149,14 @@ def main():
         if api_key_id and os.path.exists(private_key_path):
             logger.info("Authenticating with API key...")
             scanner = KalshiWeatherScanner(
-                kalshi_api_key_id=api_key_id,
-                kalshi_private_key_path=private_key_path
+                api_key_id=api_key_id,
+                private_key_path=private_key_path
             )
         elif email and password:
             logger.info("Authenticating with email/password...")
             scanner = KalshiWeatherScanner(
-                kalshi_email=email,
-                kalshi_password=password
+                email=email,
+                password=password
             )
         else:
             logger.error("No Kalshi credentials found!")
@@ -165,7 +165,7 @@ def main():
             logger.error("  - KALSHI_EMAIL + KALSHI_PASSWORD")
             return 1
 
-        logger.info(f"Authenticated using {scanner.kalshi_client.auth_method}")
+        logger.info(f"Authenticated using {scanner.kalshi.auth_method}")
 
     except Exception as e:
         logger.error(f"Failed to initialize scanner: {e}")
@@ -205,7 +205,7 @@ def main():
             logger.info("=" * 80)
 
             # Execute scan
-            opportunities = scanner.scan(mode="promo")
+            opportunities = scanner.scan()
             num_opps = len(opportunities)
 
             if num_opps > 0:

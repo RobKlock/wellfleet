@@ -92,9 +92,9 @@ class KalshiWeatherScanner:
             promo_markets = self.kalshi.get_promo_markets()
             self.logger.info(f"Found {len(promo_markets)} promo markets")
 
-            # Step 2: Filter for weather markets in Denver/Miami
+            # Step 2: Filter for weather/temperature markets (all locations)
             weather_markets = self._filter_weather_markets(promo_markets)
-            self.logger.info(f"Found {len(weather_markets)} weather markets for Denver/Miami")
+            self.logger.info(f"Found {len(weather_markets)} weather/temperature markets")
 
         if not weather_markets:
             self.logger.warning("No weather markets found. Scan complete.")
